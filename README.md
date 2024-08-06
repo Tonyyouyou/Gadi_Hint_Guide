@@ -50,6 +50,7 @@ In the `example` folder, `batch_job_example.sh` is an example of a batch job. Th
 
 ```bash
 qsub batch_job_example.sh (your job file)
+```
 
 ## Enviroment
 
@@ -61,7 +62,7 @@ For example, to load Python and create an environment, you can use the following
 
 ```bash
 module load python/3.x.x
-
+```
 For more details, please refer to the [Environment Modules](https://opus.nci.org.au/display/Help/Environment+Modules) link.
 
 ### Miniconda Enviroment
@@ -138,7 +139,7 @@ To automatically resubmit a job after it finishes, you can use the following com
 
 ```bash
 qsub -z -W depend=afterany:PBS_JOBID PBS_JOBNAME
-
+```
 In this example:
 - `PBS_JOBID` is the ID of your currently running job (you can find it using `qstat`).
 - `PBS_JOBNAME` is the name of the job you want to continue running or a new job.
@@ -147,3 +148,4 @@ For instance, if your job is `batch_job_example.sh` and it cannot complete withi
 
 ```bash
 qsub -z -W depend=afterany:1234 batch_job_example.sh
+```
