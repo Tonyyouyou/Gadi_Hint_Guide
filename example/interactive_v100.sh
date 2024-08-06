@@ -1,0 +1,1 @@
+qsub -I -qgpuvolta  -Pey69 -lwalltime=5:00:00,ncpus=12,ngpus=1,mem=90GB,jobfs=330GB,storage=gdata/wa66+gdata/po67+gdata/ey69+gdata/iv96,wd

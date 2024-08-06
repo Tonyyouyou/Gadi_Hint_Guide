@@ -1,0 +1,1 @@
+qsub -I -qdgxa100  -Pey69 -lwalltime=1:00:00,ncpus=16,ngpus=1,mem=90GB,jobfs=300GB,storage=gdata/wa66+gdata/po67+gdata/ey69+gdata/iv96,wd
