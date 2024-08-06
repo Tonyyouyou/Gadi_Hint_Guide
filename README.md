@@ -109,8 +109,6 @@ By following these steps and using `pip install`, you can effectively manage the
 
 ## Managing Large Numbers of Files
 
-Gadi has a file number limitation in the `/g/data` directory, meaning you can have large files, but not too many files. Here are three methods to address this issue:
-
 1. **Using `tar` to Package Files:**
 
     You can package your files using `tar` (without compression). When you need to use the dataset, you can extract it to the `$PBS_JOBFS` temporary directory. This directory is on the node where your resources are allocated, and you can decide how much space to allocate (up to 300GB, with no file number limitations). The data in this temporary folder will be deleted after the job ends.
@@ -122,19 +120,17 @@ Gadi has a file number limitation in the `/g/data` directory, meaning you can ha
 
     For more details, refer to `batch_job_example.sh`.
 
-2. **Using the `transformers` Package's Dataset Class:**
-
-    The `transformers` package includes a `datasets` class that allows you to organize your data into a single file. This method can also help you manage large datasets efficiently.
+2. **Using the `transformers` Package Dataset Class:**
+   The `transformers` package includes a `datasets` class that allows you to organize your data into a single file. This method can also help you manage large datasets efficiently.
 
     For more details, please visit the [Hugging Face Datasets documentation](https://huggingface.co/docs/datasets/en/index).
-
+  
 3. **Using Kaldi Supported `flac.ark` Format:**
 
     Another option is to use the `flac.ark` format supported by Kaldi, which can help manage large numbers of audio files efficiently.
 
-By utilizing these methods, you can effectively manage the file number limitations on Gadi.
 
-## Managing Jobs Exceeding 48 Hours
+### Managing Jobs Exceeding 48 Hours
 
 Gadi has a maximum job runtime limit of 48 hours. If you need to run a job for longer than this, you can refer to the `self_submit.sh` script, which contains various methods and examples. Here, I will provide the simplest method.
 
