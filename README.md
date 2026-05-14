@@ -290,6 +290,19 @@ singularity exec \
   /env/bin/python your_script.py
 ```
 
+For more complex jobs, keep the PBS directives in an outer script and run a second shell script inside the container. This is useful for single-node multi-GPU or multi-node launchers such as `torchrun`, `deepspeed`, or `accelerate`.
+
+See:
+
+- `example/singularity_outer_pbs_example.sh`: outer PBS script that loads Singularity and enters the image.
+- `example/singularity_inner_script_example.sh`: inner script that runs inside the container.
+
+Submit the outer script only:
+
+```bash
+qsub example/singularity_outer_pbs_example.sh
+```
+
 #### 7. When to delete the original conda environment
 
 The `.sqsh` image is read-only. It is good for running and debugging, but not for installing new packages. Before deleting the original conda environment, run a real test job and save a YAML record:

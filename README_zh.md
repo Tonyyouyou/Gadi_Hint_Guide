@@ -290,6 +290,19 @@ singularity exec \
   /env/bin/python your_script.py
 ```
 
+对于更复杂的任务，可以把 PBS 指令放在外层脚本里，然后在容器里运行第二个 shell 脚本。这种写法适合单机多卡或多机多卡任务，例如 `torchrun`、`deepspeed` 或 `accelerate`。
+
+可以参考：
+
+- `example/singularity_outer_pbs_example.sh`：外层 PBS 脚本，负责加载 Singularity 并进入镜像。
+- `example/singularity_inner_script_example.sh`：内层脚本，在容器内部运行真正的训练或推理逻辑。
+
+提交时只提交外层脚本：
+
+```bash
+qsub example/singularity_outer_pbs_example.sh
+```
+
 #### 7. 什么时候可以删除原始 conda 环境
 
 `.sqsh` 镜像是只读的。它适合运行和调试，但不适合继续安装新包。删除原始 conda 环境前，建议先跑一个真实任务，并保存一份 YAML 记录：
