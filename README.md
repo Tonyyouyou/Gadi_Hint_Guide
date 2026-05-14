@@ -27,6 +27,7 @@ There are three examples of interactive jobs, each corresponding to a different 
 
   ```bash
   qsub -I -q gpuvolta -P wa66 -l walltime=5:00:00,ncpus=12,ngpus=1,mem=90GB,jobfs=300GB,storage=gdata/wa66+gdata/po67+gdata/ey69+gdata/iv96,wd
+  ```
 
 Let's take **v100 GPU** as an example:
 
@@ -107,6 +108,203 @@ Here is a basic guide to setting up a Miniconda environment:
     ```
 
 By following these steps and using `pip install`, you can effectively manage the space and file number limitations on Gadi.
+
+### Packing a Conda Environment into a Singularity SquashFS Image
+
+If a conda environment is already working in your `home` directory, you can freeze it into one SquashFS image and store it under `/g/data`. This avoids keeping many small conda files in `/g/data`, and you can run the image directly with `singularity` without unpacking it every time.
+
+This method is useful when:
+
+- Your `home` directory can hold one working conda environment, but not many environments.
+- You want to archive stable environments as single files.
+- You want to avoid the file number limit in `/g/data`.
+
+The recommended workflow is:
+
+```text
+develop/debug in home conda env
+        -> pack inside an interactive job using $PBS_JOBFS
+        -> store one .sqsh file in /g/data
+        -> run/debug later with singularity shell or singularity exec
+```
+
+#### 1. Install `conda-pack`
+
+Install `conda-pack` in your base conda environment. Using `pip` is usually safer than `conda install` here because it does not trigger large conda dependency updates.
+
+```bash
+source /home/561/xz4320/miniconda3/etc/profile.d/conda.sh
+conda activate base
+
+TMPDIR=/scratch/wa66/$USER/tmp \
+python -m pip install --no-cache-dir conda-pack
+```
+
+#### 2. Start an interactive CPU job with large jobfs
+
+Do not unpack the environment on `/g/data` or `/scratch`. Use `$PBS_JOBFS`, which is temporary local storage on the allocated node and is suitable for many temporary files.
+
+Example:
+
+```bash
+qsub -I -qnormal -Piv96 -lwalltime=10:00:00,ncpus=36,mem=128GB,jobfs=200GB,storage=gdata/wa66+gdata/po67+gdata/ey69+gdata/iv96,wd
+```
+
+After the job starts, check:
+
+```bash
+echo $PBS_JOBFS
+```
+
+#### 3. Pack the environment
+
+Below is the basic idea used by `make_env.sh`. Replace `fairseq` with your own environment name if needed.
+
+```bash
+module load singularity
+source /home/561/xz4320/miniconda3/etc/profile.d/conda.sh
+
+ENV_NAME=fairseq
+TAG=$(date +%Y%m%d)
+CONDA_ROOT=/home/561/xz4320/miniconda3
+ENV_PREFIX=$CONDA_ROOT/envs/$ENV_NAME
+
+OUTDIR=/g/data/wa66/Xiangyu/enviroment_cache
+OUT=$OUTDIR/${ENV_NAME}-${TAG}.sqsh
+BUILD=$PBS_JOBFS/conda-sqsh-build/${ENV_NAME}-${TAG}
+ROOT=$BUILD/root
+TAR=$BUILD/${ENV_NAME}.tar.gz
+
+mkdir -p "$OUTDIR"
+rm -rf "$BUILD"
+mkdir -p "$ROOT/env"
+
+mkdir -p "$ROOT"/{usr/bin,usr/lib,usr/lib64,usr/sbin,etc,tmp,var/tmp,home,g,scratch,jobfs,apps,opt/nci,proc,sys,dev,half-root}
+chmod 1777 "$ROOT/tmp" "$ROOT/var/tmp"
+
+ln -s usr/bin "$ROOT/bin"
+ln -s usr/lib "$ROOT/lib"
+ln -s usr/lib64 "$ROOT/lib64"
+ln -s usr/sbin "$ROOT/sbin"
+
+touch "$ROOT/etc/passwd" "$ROOT/etc/group" "$ROOT/etc/hosts" "$ROOT/etc/resolv.conf"
+
+conda-pack \
+  -p "$ENV_PREFIX" \
+  --dest-prefix /env \
+  -o "$TAR" \
+  --force
+
+tar -xzf "$TAR" -C "$ROOT/env"
+rm -f "$TAR"
+
+mksquashfs "$ROOT" "$OUT" \
+  -noappend \
+  -comp xz \
+  -processors "${PBS_NCPUS:-2}" \
+  -mem 8G \
+  -no-xattrs \
+  -no-progress
+```
+
+The final output is one file, for example:
+
+```bash
+/g/data/wa66/Xiangyu/enviroment_cache/fairseq-20260514.sqsh
+```
+
+After confirming the image works, the temporary `$PBS_JOBFS/conda-sqsh-build/...` directory can be removed. It will also disappear automatically when the job finishes.
+
+#### 4. Test the packed image
+
+On Gadi, some system libraries are symlinked through `/half-root`, so bind `/half-root` as well as `/usr` and `/etc`.
+
+```bash
+module load singularity
+
+IMG=/g/data/wa66/Xiangyu/enviroment_cache/fairseq-20260514.sqsh
+
+singularity exec \
+  --cleanenv \
+  --bind /usr:/usr,/etc:/etc,/half-root:/half-root \
+  --env LD_LIBRARY_PATH=/env/lib:/lib64:/usr/lib64 \
+  "$IMG" \
+  /env/bin/python -c "import sys; print(sys.executable); print(sys.version)"
+```
+
+For a package-level test:
+
+```bash
+singularity exec \
+  --cleanenv \
+  --bind /usr:/usr,/etc:/etc,/half-root:/half-root \
+  --env LD_LIBRARY_PATH=/env/lib:/lib64:/usr/lib64 \
+  "$IMG" \
+  /env/bin/python -c "import fairseq; print('fairseq ok')"
+```
+
+#### 5. Use the image interactively
+
+To debug inside the environment:
+
+```bash
+module load singularity
+
+IMG=/g/data/wa66/Xiangyu/enviroment_cache/fairseq-20260514.sqsh
+
+singularity shell \
+  --cleanenv \
+  --bind /usr:/usr,/etc:/etc,/half-root:/half-root \
+  --env PATH=/env/bin:/usr/local/bin:/usr/bin:/bin \
+  --env LD_LIBRARY_PATH=/env/lib:/lib64:/usr/lib64 \
+  --env PYTHONNOUSERSITE=1 \
+  "$IMG"
+```
+
+Inside the shell:
+
+```bash
+which python
+python -V
+python your_script.py
+```
+
+You should see:
+
+```bash
+/env/bin/python
+```
+
+#### 6. Use the image in a batch job
+
+```bash
+module load singularity
+
+IMG=/g/data/wa66/Xiangyu/enviroment_cache/fairseq-20260514.sqsh
+
+singularity exec \
+  --cleanenv \
+  --bind /usr:/usr,/etc:/etc,/half-root:/half-root \
+  --env LD_LIBRARY_PATH=/env/lib:/lib64:/usr/lib64 \
+  "$IMG" \
+  /env/bin/python your_script.py
+```
+
+#### 7. When to delete the original conda environment
+
+The `.sqsh` image is read-only. It is good for running and debugging, but not for installing new packages. Before deleting the original conda environment, run a real test job and save a YAML record:
+
+```bash
+conda env export -n fairseq > /g/data/wa66/Xiangyu/enviroment_cache/fairseq-20260514.yml
+```
+
+Then remove the original environment if you are confident the image works:
+
+```bash
+conda env remove -n fairseq
+```
+
+If you later need to add packages, recreate or modify the conda environment in `home`, then pack a new `.sqsh` image.
 
 ## Managing Large Numbers of Files
 
