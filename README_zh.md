@@ -18,6 +18,7 @@
 - 环境以单个 `.sqsh` 发布到 `/g/data/wa66/Xiangyu/enviroment_cache`。
 - 打包数据存到 `/g/data/wa66/Xiangyu/Data`；结果存到已有或用户明确批准的 `Result*` 目录。
 - 每次在 `wa66`、`ey69`、`po67`、`iv96` 中选择计费项目之前都重新运行实时预检；季度 KSU 和 inode 使用量是动态的。
+- 调试使用登录节点上的 `tmux` 保持经明确批准的 `qsub -I`；正式 batch 提交必须另行授权。
 
 下方旧版手工说明仅作为背景保留，其中硬编码的项目、挂载、资源数值和在 HOME 创建环境的步骤不能覆盖 skill 或 NCI 当前官方文档。
 

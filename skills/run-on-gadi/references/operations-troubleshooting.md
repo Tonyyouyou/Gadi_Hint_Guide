@@ -4,6 +4,8 @@
 
 Before `qsub`, show the selected project, queue, GPUs/CPUs, memory, jobfs, walltime, storage mounts, estimated SU, script path, and linter result. Submission is charged; a request to edit a script is not permission to submit it.
 
+Interactive-debug approval and production-batch approval are separate. Keep `qsub -I` inside a detached login-node tmux session as described in [debugging.md](debugging.md). Do not interpret access to an interactive shell as permission to submit a later batch job.
+
 Create the parent of the absolute `#PBS -o` path before submission and use `#PBS -j oe` to keep one bounded log per job. Never accept PBS defaults that can place stdout/stderr in HOME.
 
 Before `qdel`, cleanup, replacement, or deletion, identify exact jobs/files and obtain explicit approval.

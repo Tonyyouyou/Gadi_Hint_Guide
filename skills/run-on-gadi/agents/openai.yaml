@@ -1,4 +1,4 @@
 interface:
   display_name: "Run on Gadi"
-  short_description: "File-safe NCI Gadi job and environment workflows"
-  default_prompt: "Use $run-on-gadi to prepare and validate a file-count-safe PBS workflow on NCI Gadi."
+  short_description: "Safe Gadi interactive debug and batch workflows"
+  default_prompt: "Use $run-on-gadi to classify this as static inspection, tmux interactive debug, or production batch, then apply the file-count-safe Gadi workflow."

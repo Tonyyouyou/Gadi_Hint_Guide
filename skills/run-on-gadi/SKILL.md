@@ -1,11 +1,21 @@
 ---
 name: run-on-gadi
-description: Prepare, validate, submit, monitor, and troubleshoot NCI Gadi PBS jobs with strict inode-safe storage and environment workflows. Use for Gadi CPU/GPU jobs including V100, A100, and H200; PBS scripts; dynamic project/SU selection; quota and file-count checks; copyq downloads; Singularity SquashFS environments; large datasets; checkpoints; distributed PyTorch; or work using /g/data/wa66/Xiangyu.
+description: Prepare, validate, submit, monitor, and troubleshoot NCI Gadi PBS jobs with strict inode-safe storage and environment workflows. Use for tmux-backed qsub -I debugging; production batch jobs; Gadi CPU/GPU work including V100, A100, and H200; PBS scripts; dynamic project/SU selection; quota and file-count checks; copyq downloads; Singularity SquashFS environments; large datasets; checkpoints; distributed PyTorch; or work using /g/data/wa66/Xiangyu.
 ---
 
 # Run on Gadi
 
 Treat persistent file count as a first-class resource alongside SU, bytes, memory, GPUs, and walltime.
+
+## Classify the Run Mode
+
+State one mode before acting:
+
+- **Static inspection**: read, edit, lint, and test without PBS.
+- **Interactive debug**: preserve an explicitly approved `qsub -I` terminal in login-node `tmux`, then debug only after PBS allocates a compute/GPU node.
+- **Production batch**: submit a standalone PBS script only after a smoke test and a separate production submission approval.
+
+Words such as "debug", "test", "try", or "interactive" never authorise a production job. Words such as "prepare", "write", or "fix the PBS script" never authorise any `qsub`. Read [references/debugging.md](references/debugging.md) for the mandatory tmux workflow and debug-to-production gate.
 
 ## Enforce Storage Boundaries
 
@@ -79,6 +89,8 @@ python /g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/lint_pbs.py job.pb
 Resolve all errors. Review warnings for resource ratios, walltime tiers, network commands outside `copyq`, persistent extraction, inode-producing caches, and any workload write under `.codex`. Report estimated SU.
 
 Generate and edit scripts without extra approval. Run `qsub`, `qdel`, or destructive cleanup only when the user explicitly requests that side effect. Present a complete interactive `qsub -I` command before executing it.
+
+For interactive debugging, preview [scripts/debug_session.sh](scripts/debug_session.sh) first. Only after explicit approval may it be repeated with `--start`. Do not touch an existing tmux session unless the user identifies it as the target.
 
 ## Build Environments in JobFS
 

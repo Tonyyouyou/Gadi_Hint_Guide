@@ -18,6 +18,7 @@ Invoke it in Codex as `$run-on-gadi`. The non-negotiable storage policy is:
 - Publish environments as single `.sqsh` files in `/g/data/wa66/Xiangyu/enviroment_cache`.
 - Publish packed datasets in `/g/data/wa66/Xiangyu/Data` and results in an existing/user-approved `Result*` directory.
 - Re-run the live preflight for `wa66`, `ey69`, `po67`, and `iv96` before choosing a charging project; quarterly KSU and inode usage are dynamic.
+- Debug through login-node `tmux` plus an explicitly approved `qsub -I`; production batch submission requires separate approval.
 
 The older manual notes below are retained as background. Hard-coded projects, mounts, resource values, and HOME-based environment steps in those notes must not override the skill or current NCI documentation.
 
