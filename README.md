@@ -1,10 +1,32 @@
 # Gadi_Hint_Guide
+
+## Codex Skill (Current Workflow)
+
+The maintained, agent-facing guide is [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md). It combines current NCI guidance, a dated H200/A100/V100 queue snapshot, live allocation probes, PBS linting, file-safe environment/data tools, and reusable templates.
+
+For this account, it is installed as:
+
+```text
+/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi
+  -> ../repos/Gadi_Hint_Guide/skills/run-on-gadi
+```
+
+Invoke it in Codex as `$run-on-gadi`. The non-negotiable storage policy is:
+
+- `/g/data/wa66/Xiangyu/.codex` is only for Codex configuration, skills, and their source repositories. Never put workload data, models, environments, caches, checkpoints, logs, or results there.
+- Build expanded environments, downloads, caches, and extracted datasets only in `$PBS_JOBFS`.
+- Publish environments as single `.sqsh` files in `/g/data/wa66/Xiangyu/enviroment_cache`.
+- Publish packed datasets in `/g/data/wa66/Xiangyu/Data` and results in an existing/user-approved `Result*` directory.
+- Re-run the live preflight for `wa66`, `ey69`, `po67`, and `iv96` before choosing a charging project; quarterly KSU and inode usage are dynamic.
+
+The older manual notes below are retained as background. Hard-coded projects, mounts, resource values, and HOME-based environment steps in those notes must not override the skill or current NCI documentation.
+
 ## Overview
 
 This guide covers the basic usage methods for the Gadi supercomputer, including how to submit jobs, manage environments, run jobs with limited file numbers, and execute jobs that exceed 48 hours.
 
 ## Basic Gadi Structure
-- `home`: This directory is for your environment settings and code storage. It offers **10GB** of space without any file number limitations.
+- `home`: This directory has a **10GB** quota. Keep only small code and shell configuration here; do not create new environments or allow caches, datasets, model downloads, checkpoints, or PBS logs to accumulate here.
 
 - `/g/data`: This directory is for storing your data. **Warning**: There is a file number limitation for this folder, so it's recommended to tar your data to avoid issues.
 
@@ -67,6 +89,8 @@ module load python/3.x.x
 For more details, please refer to the [Environment Modules](https://opus.nci.org.au/display/Help/Environment+Modules) link.
 
 ### Miniconda Enviroment
+
+> Legacy background only: do not create a new expanded environment in HOME or gdata. Use the Codex skill to build it in `$PBS_JOBFS` and publish one `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`.
 
 Due to the file number limitations in the `/g/data` directory on Gadi, we cannot install Miniconda there. However, since the `home` directory only has 10GB of space, some tricks are needed when installing Miniconda.
 

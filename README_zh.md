@@ -1,12 +1,33 @@
 # Gadi_Hint_Guide 中文版
 
+## Codex Skill（当前工作流）
+
+现在维护的、供 agent 使用的指南位于 [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md)。它整合了 NCI 最新文档、带日期的 H200/A100/V100 队列快照、实时额度探测、PBS 静态检查、文件数安全的环境/数据工具和可复用模板。
+
+这个账号上已经安装为：
+
+```text
+/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi
+  -> ../repos/Gadi_Hint_Guide/skills/run-on-gadi
+```
+
+在 Codex 中使用 `$run-on-gadi`。以下存储规则不可违反：
+
+- `/g/data/wa66/Xiangyu/.codex` 只存 Codex 配置、skill 和 skill 源码仓库；禁止存放任务数据、模型、环境、缓存、checkpoint、日志和结果。
+- 展开的环境、下载、缓存和解压数据只能放在 `$PBS_JOBFS`。
+- 环境以单个 `.sqsh` 发布到 `/g/data/wa66/Xiangyu/enviroment_cache`。
+- 打包数据存到 `/g/data/wa66/Xiangyu/Data`；结果存到已有或用户明确批准的 `Result*` 目录。
+- 每次在 `wa66`、`ey69`、`po67`、`iv96` 中选择计费项目之前都重新运行实时预检；季度 KSU 和 inode 使用量是动态的。
+
+下方旧版手工说明仅作为背景保留，其中硬编码的项目、挂载、资源数值和在 HOME 创建环境的步骤不能覆盖 skill 或 NCI 当前官方文档。
+
 ## 概览
 
 这份指南介绍 Gadi 超算的一些基础使用方法，包括如何提交任务、管理环境、处理大量小文件，以及运行超过 48 小时的任务。
 
 ## Gadi 基础目录结构
 
-- `home`：用于存放环境配置和代码。空间为 **10GB**，文件数量限制相对宽松。
+- `home`：空间配额为 **10GB**。这里只保留少量代码和 shell 配置；不要新建环境，也不要让缓存、数据、模型下载、checkpoint 或 PBS 日志堆积在这里。
 
 - `/g/data`：用于存放数据。**注意**：这个目录有文件数量限制，因此建议把大量小文件打包成单个文件保存。
 
@@ -67,6 +88,8 @@ module load python/3.x.x
 更多细节请参考 [Environment Modules](https://opus.nci.org.au/display/Help/Environment+Modules)。
 
 ### Miniconda 环境
+
+> 仅保留为旧版背景：不要再把展开的新环境创建到 HOME 或 gdata。应通过 Codex skill 在 `$PBS_JOBFS` 中构建，再把单个 `.sqsh` 发布到 `/g/data/wa66/Xiangyu/enviroment_cache`。
 
 由于 Gadi 的 `/g/data` 有文件数量限制，不建议把 Miniconda 安装在那里。但 `home` 目录只有 10GB，所以在 `home` 里安装 Miniconda 也需要一些技巧。
 

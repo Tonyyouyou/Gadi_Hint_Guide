@@ -1,0 +1,74 @@
+{
+  "verified_at": "2026-08-12",
+  "sources": {
+    "queue_structure": "https://opus.nci.org.au/spaces/Help/pages/236880996/Queue%2BStructure%2Bon%2BGadi...",
+    "queue_limits": "https://opus.nci.org.au/spaces/Help/pages/236881198/Queue%2BLimits...",
+    "job_submission": "https://opus.nci.org.au/spaces/Help/pages/236880320/Job%2BSubmission...",
+    "job_monitoring": "https://opus.nci.org.au/spaces/Help/pages/236880322/Job%2Bmonitoring..."
+  },
+  "queues": {
+    "normal": {
+      "kind": "cpu",
+      "ncpus_per_node": 48,
+      "mem_gb_per_node": 190,
+      "jobfs_gb_per_node": 400,
+      "charge_su_per_resource_hour": 2.0,
+      "ncpus_rule": {"partial_range": [1, 48], "full_node_multiple": 48, "max": 20736},
+      "walltime_tiers": [[1, 672, 48], [720, 1440, 24], [1488, 2976, 10], [3024, 20736, 5]]
+    },
+    "normalsr": {
+      "kind": "cpu",
+      "ncpus_per_node": 104,
+      "mem_gb_per_node": 500,
+      "jobfs_gb_per_node": 400,
+      "charge_su_per_resource_hour": 2.0,
+      "ncpus_rule": {"partial_range": [1, 104], "full_node_multiple": 104, "max": 10400},
+      "walltime_tiers": [[1, 936, 48], [1040, 2080, 24], [2184, 4160, 10], [4264, 10400, 5]]
+    },
+    "copyq": {
+      "kind": "network",
+      "ncpus_per_node": 48,
+      "mem_gb_per_node": 190,
+      "jobfs_gb_per_node": 200,
+      "charge_su_per_resource_hour": 2.0,
+      "ncpus_rule": {"values": [1], "max": 1},
+      "walltime_tiers": [[1, 1, 10]]
+    },
+    "gpuvolta": {
+      "kind": "gpu",
+      "gpu_model": "V100-32GB",
+      "gpus_per_node": 4,
+      "ncpus_per_gpu": 12,
+      "ncpus_per_node": 48,
+      "mem_gb_per_node": 382,
+      "jobfs_gb_per_node": 400,
+      "charge_su_per_resource_hour": 3.0,
+      "ncpus_rule": {"multiple": 12, "max": 960},
+      "walltime_tiers": [[12, 96, 48], [144, 192, 24], [240, 960, 5]]
+    },
+    "dgxa100": {
+      "kind": "gpu",
+      "gpu_model": "A100-80GB",
+      "gpus_per_node": 8,
+      "ncpus_per_gpu": 16,
+      "ncpus_per_node": 128,
+      "mem_gb_per_node": 2000,
+      "jobfs_gb_per_node": 28672,
+      "charge_su_per_resource_hour": 4.5,
+      "ncpus_rule": {"multiple": 16, "max": 256},
+      "walltime_tiers": [[16, 128, 48], [144, 256, 5]]
+    },
+    "gpuhopper": {
+      "kind": "gpu",
+      "gpu_model": "H200-141GB",
+      "gpus_per_node": 4,
+      "ncpus_per_gpu": 12,
+      "ncpus_per_node": 48,
+      "mem_gb_per_node": 1024,
+      "jobfs_gb_per_node": 1741,
+      "charge_su_per_resource_hour": 7.5,
+      "ncpus_rule": {"partial_values": [12, 24, 36, 48], "full_node_multiple": 48, "max": 720},
+      "walltime_tiers": [[12, 96, 48], [144, 192, 24], [240, 720, 5]]
+    }
+  }
+}

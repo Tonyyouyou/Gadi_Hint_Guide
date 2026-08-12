@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Replace every CHANGE_ME and create the PBS log parent before qsub.
+#PBS -P CHANGE_ME
+#PBS -q gpuhopper
+#PBS -N CHANGE_ME
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=128GB
+#PBS -l jobfs=500GB
+#PBS -l walltime=02:00:00
+#PBS -l storage=gdata/wa66
+#PBS -l wd
+#PBS -j oe
+#PBS -o /g/data/wa66/Xiangyu/Result_CHANGE_ME/pbs-logs/CHANGE_ME.log
+
+set -euo pipefail
+
+export TMPDIR="$PBS_JOBFS/tmp"
+export XDG_CACHE_HOME="$PBS_JOBFS/cache/xdg"
+export HF_HOME="$PBS_JOBFS/cache/huggingface"
+export TORCH_HOME="$PBS_JOBFS/cache/torch"
+export PIP_CACHE_DIR="$PBS_JOBFS/cache/pip"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HF_HOME" "$TORCH_HOME" "$PIP_CACHE_DIR"
+
+module purge
+module load singularity
+
+IMAGE=/g/data/wa66/Xiangyu/enviroment_cache/CHANGE_ME.sqsh
+RESULT_DIR=/g/data/wa66/Xiangyu/Result_CHANGE_ME/CHANGE_ME
+CODE=/absolute/path/to/CHANGE_ME.py
+RUNNER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/run_sqsh.sh
+
+mkdir -p "$RESULT_DIR"
+nvidia-smi
+bash "$RUNNER" \
+  --nv \
+  --write-path "$RESULT_DIR" \
+  "$IMAGE" \
+  /env/bin/python "$CODE" --output-dir "$RESULT_DIR"

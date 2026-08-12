@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Replace every CHANGE_ME and create the PBS log parent before qsub.
+#PBS -P CHANGE_ME
+#PBS -q copyq
+#PBS -N acquire-data
+#PBS -l ncpus=1
+#PBS -l mem=16GB
+#PBS -l jobfs=200GB
+#PBS -l walltime=10:00:00
+#PBS -l storage=gdata/wa66
+#PBS -l wd
+#PBS -j oe
+#PBS -o /g/data/wa66/Xiangyu/Result_CHANGE_ME/pbs-logs/acquire-CHANGE_ME.log
+
+set -euo pipefail
+
+export TMPDIR="$PBS_JOBFS/tmp"
+export XDG_CACHE_HOME="$PBS_JOBFS/cache/xdg"
+export HF_HOME="$PBS_JOBFS/cache/huggingface"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+export TORCH_HOME="$PBS_JOBFS/cache/torch"
+export PIP_CACHE_DIR="$PBS_JOBFS/cache/pip"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HUGGINGFACE_HUB_CACHE" "$TORCH_HOME" "$PIP_CACHE_DIR"
+
+DATASET=CHANGE_ME
+URL=CHANGE_ME
+EXPECTED_SHA256=CHANGE_ME
+DOWNLOAD_ROOT="$PBS_JOBFS/download/$DATASET"
+PACKER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/pack_data.sh
+
+mkdir -p "$DOWNLOAD_ROOT"
+curl --fail --location --retry 5 --output "$DOWNLOAD_ROOT/source" "$URL"
+printf '%s  %s\n' "$EXPECTED_SHA256" "$DOWNLOAD_ROOT/source" | sha256sum --check -
+
+# Add extraction or conversion here, but keep every expanded file under DOWNLOAD_ROOT.
+bash "$PACKER" --name "$DATASET" --source "$DOWNLOAD_ROOT"

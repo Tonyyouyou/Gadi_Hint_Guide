@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Replace every CHANGE_ME and create the PBS log parent before qsub.
+#PBS -P CHANGE_ME
+#PBS -q copyq
+#PBS -N build-sqsh
+#PBS -l ncpus=1
+#PBS -l mem=32GB
+#PBS -l jobfs=200GB
+#PBS -l walltime=10:00:00
+#PBS -l storage=gdata/wa66
+#PBS -l wd
+#PBS -j oe
+#PBS -o /g/data/wa66/Xiangyu/Result_CHANGE_ME/pbs-logs/build-CHANGE_ME.log
+
+set -euo pipefail
+
+module purge
+module load singularity
+
+ENV_NAME=CHANGE_ME
+ENV_SPEC=/absolute/path/to/CHANGE_ME.yml
+CONDA_BIN=/home/561/xz4320/miniconda3/bin/conda
+BUILDER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/build_conda_sqsh.sh
+
+[[ -f "$ENV_SPEC" ]] || { echo "Missing environment spec: $ENV_SPEC" >&2; exit 1; }
+bash "$BUILDER" \
+  --name "$ENV_NAME" \
+  --environment "$ENV_SPEC" \
+  --conda "$CONDA_BIN"
