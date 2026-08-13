@@ -143,6 +143,20 @@ bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN
 bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN --start
 ```
 
+To make a campaign's model choice reproducible instead of inheriting a mutable global
+configuration, pass the same explicit settings to preview and start:
+
+```bash
+bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN \
+  --model gpt-5.6-sol --reasoning-effort ultra
+bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN \
+  --model gpt-5.6-sol --reasoning-effort ultra --start
+```
+
+The controller applies these settings to both the resumable author and every fresh novelty
+reviewer thread. Record the exact launcher under the campaign root so a persistent-session
+restart cannot silently fall back to different defaults.
+
 Run the second command only after connecting to the persistent host. The helper uses a clean no-profile tmux command so stale HOME startup references cannot leak into the controller. For an attended three-to-four-hour exploration, a foreground Codex `/goal` may drive the same campaign directly and use the interactive pane; still persist every experiment and handoff through `campaign.py`. Use the event-driven controller for queued or overnight work so Codex is invoked only when a decision is needed.
 
 The first command previews. The second is permitted only after the campaign grants `allow_auto_agent` and a live pilot verifies Codex authentication/network access in the persistent session. The controller:

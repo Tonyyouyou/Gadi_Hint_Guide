@@ -156,6 +156,23 @@ class StartControllerTests(unittest.TestCase):
         self.assertIn("PBS_JOBFS", log)
         self.assertIn("--poll-seconds", log)
 
+    def test_start_persists_explicit_model_and_reasoning_effort(self) -> None:
+        result = self.run_helper(
+            "--model",
+            "gpt-5.6-sol",
+            "--reasoning-effort",
+            "ultra",
+            "--start",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Model:        gpt-5.6-sol", result.stdout)
+        self.assertIn("Reasoning:    ultra", result.stdout)
+        log = self.tmux_log.read_text(encoding="utf-8")
+        self.assertIn("--model", log)
+        self.assertIn("gpt-5.6-sol", log)
+        self.assertIn("--reasoning-effort", log)
+        self.assertIn("ultra", log)
+
 
 if __name__ == "__main__":
     unittest.main()

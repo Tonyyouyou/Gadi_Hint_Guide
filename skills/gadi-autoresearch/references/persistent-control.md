@@ -51,6 +51,19 @@ Start in the campaign tmux only after verifying `codex exec` authentication and 
 bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN --start
 ```
 
+When the user requests a specific model or reasoning tier, pin both in the preview and start
+commands rather than relying on the global Codex configuration:
+
+```bash
+bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN \
+  --model gpt-5.6-sol --reasoning-effort ultra
+bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN \
+  --model gpt-5.6-sol --reasoning-effort ultra --start
+```
+
+Keep an exact launcher in the campaign root for failure recovery. The controller forwards the
+pinned settings to the long-lived author thread and to fresh novelty-review threads.
+
 The starter invokes the existing modern control-plane Python explicitly and launches a no-profile shell with stale PBS/jobfs/cache variables removed. It never edits HOME startup files.
 
 The controller holds `controller.lock`, reads `campaign.json`, and acts only on control state:

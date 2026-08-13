@@ -287,6 +287,24 @@ class ControllerTests(unittest.TestCase):
         self.assertLess(resumed.index("--approve-for-me"), resumed.index("resume"))
         self.assertEqual(resumed[resumed.index("--add-dir") + 1], str(self.root))
 
+    def test_codex_command_pins_model_and_ultra_effort(self) -> None:
+        state = campaign.load_state(self.root)
+        command = controller.codex_command(
+            "codex",
+            self.workspace,
+            state,
+            self.root,
+            "gpt-5.6-sol",
+            "ultra",
+        )
+        self.assertEqual(command[1:5], [
+            "--model",
+            "gpt-5.6-sol",
+            "--config",
+            'model_reasoning_effort="ultra"',
+        ])
+        self.assertLess(command.index("--config"), command.index("exec"))
+
     def test_novelty_reviewer_command_always_starts_a_fresh_thread(self) -> None:
         state = campaign.load_state(self.root)
         state["control"]["thread_id"] = "author-thread"
@@ -301,6 +319,17 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("cold, adversarial novelty reviewer", command[-1])
         self.assertIn("blind-candidate", command[-1])
         self.assertIn("do not open IDEA_REPORT.md", command[-1])
+
+        pinned = controller.novelty_codex_command(
+            "codex",
+            self.workspace,
+            self.root,
+            audit,
+            "gpt-5.6-sol",
+            "ultra",
+        )
+        self.assertIn("gpt-5.6-sol", pinned)
+        self.assertIn('model_reasoning_effort="ultra"', pinned)
 
     def test_controller_attests_valid_review_from_distinct_thread(self) -> None:
         review = self.prepare_novelty_review()

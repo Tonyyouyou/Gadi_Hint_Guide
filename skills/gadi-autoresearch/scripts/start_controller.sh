@@ -11,6 +11,8 @@ detached tmux session on an NCI persistent-session control host.
 
 Options:
   --codex-bin PATH          Codex executable (default: command -v codex)
+  --model MODEL             Explicit Codex model for all campaign turns
+  --reasoning-effort LEVEL  low|medium|high|xhigh|max|ultra
   --persistent-control-host
                             Accept an internal persistent-host name that does
                             not end in .ps.gadi.nci.org.au
@@ -27,6 +29,8 @@ die() {
 ROOT=
 SESSION=
 CODEX_BIN=
+MODEL=
+REASONING_EFFORT=
 START=0
 PERSISTENT_CONTROL_HOST=0
 
@@ -35,6 +39,8 @@ while (($#)); do
     --root) ROOT=${2:?}; shift 2 ;;
     --session) SESSION=${2:?}; shift 2 ;;
     --codex-bin) CODEX_BIN=${2:?}; shift 2 ;;
+    --model) MODEL=${2:?}; shift 2 ;;
+    --reasoning-effort) REASONING_EFFORT=${2:?}; shift 2 ;;
     --persistent-control-host) PERSISTENT_CONTROL_HOST=1; shift ;;
     --start) START=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -61,6 +67,12 @@ if [[ -z "$CODEX_BIN" ]]; then
 fi
 [[ -n "$CODEX_BIN" && -x "$CODEX_BIN" ]] || die "Codex executable is unavailable: $CODEX_BIN"
 command -v node >/dev/null 2>&1 || die "node is unavailable for the installed Codex launcher"
+if [[ -n "$REASONING_EFFORT" ]]; then
+  case "$REASONING_EFFORT" in
+    low|medium|high|xhigh|max|ultra) ;;
+    *) die "--reasoning-effort must be low, medium, high, xhigh, max, or ultra" ;;
+  esac
+fi
 
 HOST=$(hostname -f)
 if ((START == 1)); then
@@ -76,6 +88,10 @@ if ((START == 1)); then
   esac
 fi
 
+CONTROLLER_ARGS=("$ROOT" --codex-bin "$CODEX_BIN")
+[[ -z "$MODEL" ]] || CONTROLLER_ARGS+=(--model "$MODEL")
+[[ -z "$REASONING_EFFORT" ]] || CONTROLLER_ARGS+=(--reasoning-effort "$REASONING_EFFORT")
+
 COMMAND=(
   env
   -u PBS_JOBID -u PBS_JOBFS -u TMPDIR
@@ -85,8 +101,7 @@ COMMAND=(
   -u TRANSFORMERS_CACHE -u TORCH_HOME -u PIP_CACHE_DIR
   -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME
   PYTHONDONTWRITEBYTECODE=1
-  "$PYTHON" "$CONTROLLER" "$ROOT"
-  --codex-bin "$CODEX_BIN"
+  "$PYTHON" "$CONTROLLER" "${CONTROLLER_ARGS[@]}"
   --start --loop --poll-seconds 600
 )
 printf -v DISPLAY '%q ' "${COMMAND[@]}"
@@ -99,9 +114,11 @@ echo "  Control host: $HOST"
 echo "  Campaign:     $ROOT"
 echo "  tmux session: $SESSION"
 echo "  Codex:        $CODEX_BIN"
+echo "  Model:        ${MODEL:-config default}"
+echo "  Reasoning:    ${REASONING_EFFORT:-config default}"
 echo "  Command:      $DISPLAY"
 echo
-"$PYTHON" "$CONTROLLER" "$ROOT" --codex-bin "$CODEX_BIN"
+"$PYTHON" "$CONTROLLER" "${CONTROLLER_ARGS[@]}"
 
 if ((START == 0)); then
   echo

@@ -21,6 +21,7 @@ import campaign
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
 NOVELTY_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "novelty-audit.md"
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def rotate_log(path: Path) -> None:
@@ -143,10 +144,36 @@ Browse primary sources and inspect full papers plus official code when available
 After fixing your independent source set and preliminary judgment, read the author artifacts, test the author's strongest rebuttal, and inspect additional cited sources where needed. Write the exact schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_REVIEW.json. Bind it to the recorded audit hash, include at least three independently checked primary sources and a comparison for every primitive, then register it with assurance provisional using campaign.py. Hand off to needs_agent with a concrete verdict. If a reliable review cannot be completed, hand off to waiting_human instead of guessing. The controller will reject the review if this thread matches the author thread, the audit changed, the source workspace changes, the schema is incomplete, an old review is reused, or the required handoff is absent. A fresh same-family review is process-independent but remains scientifically provisional."""
 
 
-def codex_command(codex_bin: str, workspace: Path, state: dict[str, Any], root: Path) -> list[str]:
+def codex_prefix(
+    codex_bin: str,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> list[str]:
+    command = [codex_bin]
+    if model:
+        command.extend(["--model", model])
+    if reasoning_effort:
+        command.extend(["--config", f'model_reasoning_effort="{reasoning_effort}"'])
+    return command
+
+
+def codex_command(
+    codex_bin: str,
+    workspace: Path,
+    state: dict[str, Any],
+    root: Path,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> list[str]:
     thread_id = state["control"].get("thread_id")
     prompt = agent_prompt(root)
-    common = [codex_bin, "exec", "--approve-for-me", "--add-dir", str(root)]
+    common = [
+        *codex_prefix(codex_bin, model, reasoning_effort),
+        "exec",
+        "--approve-for-me",
+        "--add-dir",
+        str(root),
+    ]
     if thread_id:
         return [*common, "resume", "--json", thread_id, prompt]
     return [*common, "--json", "-C", str(workspace), prompt]
@@ -157,12 +184,25 @@ def novelty_codex_command(
     workspace: Path,
     root: Path,
     audit: dict[str, Any],
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> list[str]:
-    common = [codex_bin, "exec", "--approve-for-me", "--add-dir", str(root)]
+    common = [
+        *codex_prefix(codex_bin, model, reasoning_effort),
+        "exec",
+        "--approve-for-me",
+        "--add-dir",
+        str(root),
+    ]
     return [*common, "--json", "-C", str(workspace), novelty_reviewer_prompt(root, audit)]
 
 
-def run_agent(root: Path, codex_bin: str) -> None:
+def run_agent(
+    root: Path,
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
     state = campaign.load_state(root)
     campaign.require_approved(state, "allow_auto_agent")
     campaign.require_current_skill(state)
@@ -191,14 +231,18 @@ def run_agent(root: Path, codex_bin: str) -> None:
         campaign.require_current_skill(current)
         current["control"].update({"state": "agent_running", "reason": "controller launched Codex"})
         campaign.add_history(current, "controller_transition", control_updates={"state": "agent_running"})
-    command = codex_command(codex_bin, workspace, current, root)
+    command = codex_command(codex_bin, workspace, current, root, model, reasoning_effort)
     log_path = root / "controller.log"
     rotate_log(log_path)
     discovered_thread = None
     log = log_path.open("a", encoding="utf-8")
     returncode = 1
     try:
-        log.write(f"\n[{campaign.utc_now()}] launch: {' '.join(command[:4])}\n")
+        log.write(
+            f"\n[{campaign.utc_now()}] launch author: "
+            f"model={model or 'config default'} "
+            f"reasoning_effort={reasoning_effort or 'config default'}\n"
+        )
         log.flush()
         try:
             process = subprocess.Popen(
@@ -254,7 +298,12 @@ def run_agent(root: Path, codex_bin: str) -> None:
         campaign.add_history(updated, "agent_turn_finished", returncode=returncode, thread_id=discovered_thread or updated["control"].get("thread_id"))
 
 
-def run_novelty_reviewer(root: Path, codex_bin: str) -> None:
+def run_novelty_reviewer(
+    root: Path,
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
     state = campaign.load_state(root)
     campaign.require_approved(state, "allow_auto_agent")
     campaign.require_current_skill(state)
@@ -327,14 +376,25 @@ def run_novelty_reviewer(root: Path, codex_bin: str) -> None:
             invalidated_review_sha256=(previous_review or {}).get("sha256"),
         )
 
-    command = novelty_codex_command(codex_bin, workspace, root, audit)
+    command = novelty_codex_command(
+        codex_bin,
+        workspace,
+        root,
+        audit,
+        model,
+        reasoning_effort,
+    )
     log_path = root / "controller.log"
     rotate_log(log_path)
     discovered_thread = None
     log = log_path.open("a", encoding="utf-8")
     returncode = 1
     try:
-        log.write(f"\n[{campaign.utc_now()}] novelty-review launch: {' '.join(command[:4])}\n")
+        log.write(
+            f"\n[{campaign.utc_now()}] launch novelty reviewer: "
+            f"model={model or 'config default'} "
+            f"reasoning_effort={reasoning_effort or 'config default'}\n"
+        )
         log.flush()
         try:
             process = subprocess.Popen(
@@ -442,7 +502,12 @@ def describe_action(state: dict[str, Any]) -> str:
     return f"stop and wait: {control}"
 
 
-def tick(root: Path, codex_bin: str) -> bool:
+def tick(
+    root: Path,
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> bool:
     state = campaign.load_state(root)
     if state["status"] != "active":
         return False
@@ -476,9 +541,9 @@ def tick(root: Path, codex_bin: str) -> bool:
         state = campaign.load_state(root)
         control = state["control"]["state"]
     if control == "needs_agent":
-        run_agent(root, codex_bin)
+        run_agent(root, codex_bin, model, reasoning_effort)
     elif control == "needs_novelty_review":
-        run_novelty_reviewer(root, codex_bin)
+        run_novelty_reviewer(root, codex_bin, model, reasoning_effort)
     return campaign.load_state(root)["status"] == "active"
 
 
@@ -486,6 +551,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root")
     parser.add_argument("--codex-bin", default="codex")
+    parser.add_argument("--model", help="explicit Codex model for every author and reviewer turn")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=REASONING_EFFORTS,
+        help="explicit Codex reasoning effort for every author and reviewer turn",
+    )
     parser.add_argument("--poll-seconds", type=int, default=600)
     parser.add_argument("--start", action="store_true", help="perform controller actions; preview is default")
     parser.add_argument("--loop", action="store_true", help="keep watching until the campaign pauses or completes")
@@ -509,13 +580,21 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"campaign": state["campaign_id"], "action": "stop: approval deadline expired"}, indent=2))
             return 0
         if not args.start:
-            print(json.dumps({"campaign": state["campaign_id"], "action": describe_action(state), "control": state["control"]}, indent=2))
+            print(json.dumps({
+                "campaign": state["campaign_id"],
+                "action": describe_action(state),
+                "agent": {
+                    "model": args.model or "config default",
+                    "reasoning_effort": args.reasoning_effort or "config default",
+                },
+                "control": state["control"],
+            }, indent=2))
             return 0
         campaign.require_approved(state)
         campaign.require_approved(state, "allow_auto_agent")
         with controller_lock(root):
             while True:
-                active = tick(root, args.codex_bin)
+                active = tick(root, args.codex_bin, args.model, args.reasoning_effort)
                 if not args.loop or not active:
                     break
                 state = campaign.load_state(root)
