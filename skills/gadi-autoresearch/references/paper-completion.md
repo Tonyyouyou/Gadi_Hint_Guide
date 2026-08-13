@@ -19,6 +19,12 @@ paper/
 
 Build auxiliary files in `$PBS_JOBFS` when compilation needs a PBS/container environment, then copy back only source, bibliography, final figures, and `main.pdf`. A short lightweight compile may run as static work if it stays within login limits; otherwise use a CPU batch job and a TeX `.sqsh`.
 
+## Overleaf Git Handoff
+
+When the user identifies an Overleaf project, use its project ID with the clean remote URL `https://git.overleaf.com/<PROJECT_ID>`. The username is `git`; the host-specific Git credential helper obtains the authentication token from `OVERLEAF_TOKEN`, with a private gdata-backed fallback. The token is an account credential, not a project ID.
+
+Clone only into the campaign workspace or another user-approved path under `/g/data/wa66/Xiangyu`, never HOME or `.codex`. Keep the paper repository compact and exclude LaTeX auxiliary output. Never put the token in a clone URL, Git remote, tracked `.env` file, PBS script, command log, paper source, or skill repository. A clone or pull does not authorise pushing changes to Overleaf; push only when the user explicitly requests that external update.
+
 ## Required Audits
 
 Before final completion:
