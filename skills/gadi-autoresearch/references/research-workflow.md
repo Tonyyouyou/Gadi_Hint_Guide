@@ -2,138 +2,229 @@
 
 ## Contents
 
-1. Intake and literature
-2. Idea discovery
-3. Novelty review
-4. Research contract and plan
-5. Implementation and sanity
-6. Evidence campaign
-7. Review and synthesis
-8. Paper handoff
+1. Mission and territory
+2. Evidence-led discovery
+3. Candidate portfolio
+4. Novelty review and fallback
+5. Research contract and plan
+6. Implementation and sanity
+7. Evidence campaign
+8. Review and synthesis
+9. Paper handoff
 
-## Intake and Literature
+## Mission and Territory
 
-Convert the user's broad direction into `RESEARCH_BRIEF.md` with problem, scientific context, constraints, available code/data, non-goals, target audience, compute envelope, and falsifiable success criteria. If the target venue is unknown, use `generic-preprint`; do not block research merely to guess a venue.
+Treat `MISSION.json` as immutable user intent. It defines acceptable final contributions,
+exploration breadth, fallback behavior, domain packs, human-evaluation policy, and target output.
+Do not reinterpret a requested method or system paper as permission to finish a diagnostic paper.
 
-Search recent primary literature and official datasets/code. Record one deduplicated table in `LITERATURE.md`: citation key, claim, evidence type, dataset, metric, limitations, code/data availability, and relevance. Do not download a PDF collection by default. Keep selected papers as metadata/notes; if PDFs are essential, acquire and pack them through inode-safe storage.
+In `territory`, convert the mission into `RESEARCH_BRIEF.md` with scientific scope, non-goals,
+open assets, constraints, publication audience, compute envelope, and falsifiable success criteria.
+Build one deduplicated `LITERATURE.md` from current primary papers and official code/data/model
+sources. Record citation, mechanism, evidence type, task/model family, dataset, metric, limitation,
+asset availability, and relevance. Do not download a PDF collection by default.
 
-Distinguish direct source evidence from inference. Never invent citations, identifiers, baseline numbers, or dataset licenses.
+Map the territory as cells rather than a list of method names:
 
-## Idea Discovery
+```text
+task family x model family x research lever x evidence protocol x constraint
+```
 
-Read `novelty-audit.md`. Generate multiple candidates that differ in mechanism, not wording.
-For each candidate first remove its coined name and target-task branding, then record:
+Use `adapter_registry.py list` to inspect candidates. For a broad mission, compare the most
+promising cells and deeply scout at most three. Do not select an active idea in this phase.
 
-- falsifiable hypothesis and predicted observable
-- mechanism primitives, primitive interactions, closest prior work, and remaining novelty delta
-- minimal pilot and expected GPU/SU/file cost
-- primary failure mode and disconfirming outcome
-- reuse opportunities in credible codebases
-- maximum defensible claim if the pilot succeeds
+## Evidence-Led Discovery
 
-Eliminate ideas that are already published, reduce to a renamed cross-domain transfer or obvious A+B bundle, cannot be evaluated honestly, exceed the envelope, depend on unavailable data, or only promise metric fishing. Preserve eliminated ideas in a single section so resumed agents do not repeat them.
+Enter `discovery` after recording the brief and literature. Resolve an explicit adapter route
+with `campaign.py route-set` before entering `portfolio`. Load only that route's references.
 
-Rank by novelty evidence, feasibility, empirical signal, and information gained per SU. A positive tiny pilot is not publication evidence; it only decides which hypothesis deserves a full plan.
+Create `DISCOVERY_REPORT.md` as one compact observation and opportunity ledger. Seek:
 
-Output `IDEA_REPORT.md` and record it as `idea_report`. The active idea must have a backup or a recorded reason why no backup is viable.
+- expected-versus-observed contradictions
+- stable failures under predeclared slices or perturbations
+- information produced by one component but discarded at an interface
+- objective, reward, representation, or evaluation mismatch
+- repeated computation or measured system bottlenecks
+- constraint-induced problems such as streaming, privacy, low-resource, or hardware behavior
+- formal assumption mismatch or a counterexample to accepted intuition
 
-## Novelty Review
+Use current literature, code inspection, existing results, and cheap registered `discovery` or
+`profile` experiments. A discovery probe is bounded hypothesis generation, not final evidence.
+Predeclare the question, alternative explanations, decision rule, maximum SU/jobs/files, and
+what observation would make the opportunity disappear. Do not mine many metrics and write a
+story around the best one.
 
-For the active candidate, perform the seven-route current search in `novelty-audit.md`. Inspect
-full primary sources and official code. Write and register a hash-bound `NOVELTY_AUDIT.json`,
-enter `novelty_review`, and hand off to `needs_novelty_review`.
+Preserve failures and null observations. They stop future turns from rediscovering the same
+dead end and may redirect the route. If the route changes, use `route-set`; the controller
+invalidates route-bound downstream artifacts.
 
-The author never writes the verdict artifact. The controller starts a fresh, non-resumed thread
-that independently searches the same mechanism, attacks the strongest rejection, and records
-`NOVELTY_REVIEW.json`. The controller attests the distinct thread ID and unchanged audit hash.
+## Candidate Portfolio
 
-Only a `plausibly_novel` review classified as `new_mechanism` or `new_combination` permits a
-method track. A resolved `new_application`, `reproduction`, or `diagnostic` classification may
-continue only as a diagnostic track with matching title, abstract, and claims. `unresolved` or
-`rejected` returns to idea discovery. Do not use positive profiling or a small pilot to override
-the novelty decision.
+Write and register provisional `CANDIDATE_PORTFOLIO.json` schema version 1. Bind it to
+`mission_sha256` and `route_sha256`. It contains exactly one `active` candidate and the required
+number of viable candidates:
+
+| Exploration mode | Minimum viable candidates |
+|---|---:|
+| `broad` | 3 |
+| `directed` | 2 |
+| `fixed_problem` | 1 |
+
+Each candidate must record:
+
+- observed phenomenon or precisely defined formal tension
+- causal hypothesis
+- functional mechanism without branding
+- predicted experimental or formal signature
+- decisive falsifier
+- cheapest distinguishing test
+- closest prior-work delta
+- estimated SU, job, and persistent-entry cost
+- status: `active`, `backup`, or `eliminated`
+
+Use this exact structural shape:
+
+```json
+{
+  "schema_version": 1,
+  "mission_sha256": "from-campaign.json",
+  "route_sha256": "from-campaign.json",
+  "created_at": "2026-08-13T00:00:00Z",
+  "active_candidate_id": "candidate-a",
+  "candidates": [
+    {
+      "id": "candidate-a",
+      "status": "active",
+      "observation": "Reproducible measured or formal phenomenon.",
+      "causal_hypothesis": "Proposed cause.",
+      "mechanism": "Functional intervention without branding.",
+      "predicted_signature": "Observable that follows from the hypothesis.",
+      "falsifier": "Outcome that rejects it.",
+      "cheap_test": "Lowest-cost distinguishing test.",
+      "nearest_work_delta": "What remains after closest prior work.",
+      "estimated_cost": {"su": 10, "jobs": 1, "persistent_entries": 4}
+    }
+  ]
+}
+```
+
+Add enough backup objects to meet the mode minimum; at most eight candidates are permitted.
+
+Generate mechanisms through different causal interventions, not name variations. Search across
+interfaces when useful: data-representation, encoder-connector, objective-reward, model-runtime,
+generator-evaluator, and safety-deployment. Rank candidates by importance, target-forced mechanism,
+novelty evidence, falsifiability, information per SU, available assets, and evidence validity.
+
+Do not promote a candidate merely because it is easy to implement. Preserve eliminated candidates
+and reasons in the portfolio or discovery report. A positive cheap test only promotes a candidate
+to formal novelty audit.
+
+## Novelty Review and Fallback
+
+Read `novelty-audit.md`. Write `IDEA_REPORT.md` for the active portfolio candidate, then create
+schema-version-2 `NOVELTY_AUDIT.json` bound to mission, route, portfolio, and idea hashes. Enter
+`novelty_review` and hand off to `needs_novelty_review`.
+
+The controller starts a fresh non-resumed reviewer. It independently searches the mechanism,
+classifies the actual contribution, and writes `NOVELTY_REVIEW.json`. The author never writes the
+verdict artifact.
+
+Planning is allowed only when the reviewed claim class is in the mission's
+`acceptable_contributions`. If the reviewer rejects, requests changes, or reclassifies the active
+candidate outside the mission, the controller automatically returns to:
+
+- `portfolio` when a backup candidate exists
+- `discovery` when no backup remains
+
+Retain the rejected review as evidence. Promote or generate another candidate and repeat the
+audit. Only a mission with `fallback_policy: allow_diagnostic` may finish as a new application,
+reproduction, or diagnostic contribution.
 
 ## Research Contract and Plan
 
-After novelty classification and before the main experiment, freeze `RESEARCH_CONTRACT.md`:
+After a compatible novelty resolution, freeze `RESEARCH_CONTRACT.md`:
 
-- primary and secondary claims
-- evaluation type: `real_gt`, `synthetic_proxy`, `self_supervised_proxy`, `simulation_only`, or `human_eval`
-- dataset versions, train/validation/test split, contamination controls
-- primary metric and direction, secondary diagnostics
+- mission, adapter route, active candidate, and permitted claim class
+- primary and secondary claims plus explicit non-claims
+- evaluation type: real ground truth, synthetic proxy, self-supervised proxy, simulation, formal,
+  system measurement, existing human benchmark, or new human study
+- dataset/model/code versions, splits, content-level contamination controls, and licenses
+- primary metric and direction, secondary diagnostics, and adapter-specific evidence
 - official or independently reproduced baselines
-- random seeds and statistical comparison
-- ablations and stress tests
-- claim ceiling for every possible evidence type
-- stop, pivot, and no-progress criteria
+- seeds, sample sizes, statistical comparisons, uncertainty, ablations, and stress tests
+- claim ceiling for every evidence type
+- human-evaluation protocol or `waiting_human` trigger when required
+- stop, pivot, no-progress, and resource-exhaustion criteria
 
-Write `EXPERIMENT_PLAN.md` with ordered stages: environment/data witness, sanity, baseline, main method, replication, ablation, robustness, and audit. Each row must include experiment ID, question, command/config, resources, dependencies, success marker, expected persistent entries, and decision rule.
-
-For a diagnostic track, replace method-success claims with the approved application,
-reproduction, or diagnostic question. Do not schedule `pilot`, `main`, or `ablation` as evidence
-for a new-method claim.
-
-Maintain one compact `EXPERIMENT_LEDGER.jsonl` or tabular equivalent. Do not make one tracker file per run.
+Write `EXPERIMENT_PLAN.md` with ordered environment/data witnesses, sanity, baselines, primary
+evidence, replication, ablation, robustness, human handoff where needed, and audit. Every row must
+include experiment ID, question, command/config, resources, dependencies, success marker, expected
+persistent entries, and decision rule. Maintain one compact `EXPERIMENT_LEDGER.jsonl` or table.
 
 ## Implementation and Sanity
 
-Inspect and reuse the base repository before adding abstractions. Pin the exact Git commit for every run. Expose all scientific hyperparameters through config/arguments. Seed all stochastic components and save machine-readable metrics alongside the resolved config.
+Reuse a credible base repository where possible. Pin its exact commit. Expose all scientific
+hyperparameters and output paths. Seed stochastic components and save resolved configuration with
+compact machine-readable metrics.
 
-Before spending substantial GPU SU, give a fresh reviewer the research contract, experiment plan, exact code paths/diff, configuration, and evaluator. Blocking implementation/evaluation defects must be fixed and the smallest deterministic tests rerun. A same-family code review is useful but provisional; test exits and seeded kernel witnesses are deterministic evidence.
+Before substantial GPU use, give a fresh reviewer the contract, plan, code paths/diff, configuration,
+evaluator, and selected adapter requirements. Fix blocking implementation or evaluation defects and
+rerun the smallest deterministic test.
 
-Evaluation must compare predictions with dataset ground truth or explicitly labeled proxies, never another model output disguised as truth. Keep test/holdout data inaccessible to selection code where practical.
+Evaluation compares predictions with real ground truth or an explicitly labelled proxy. Keep
+holdout data inaccessible to selection code where practical. For generated media, fixed prompts,
+references, seeds, and blinded sample identifiers are part of the protocol.
 
-The sanity run proves:
-
-- image imports and seeded device kernel work
-- real input and evaluation paths resolve read-only
-- one train/eval step produces finite values
-- metric computation and success marker are correct
-- expected GPU memory, walltime, jobfs, and persistent entries are plausible
-- restart/checkpoint logic works when required
-
-Read primary logs before changing code. Never rerun unchanged after a deterministic failure. After repeated failure, distinguish code, environment, data, and hypothesis failures; do not keep patching the same layer blindly.
+The sanity witness proves imports, device kernels, real input/evaluation paths, finite computation,
+metric and success-marker correctness, memory/walltime/jobfs/file estimates, and restart behavior
+when needed. Never rerun an unchanged deterministic failure.
 
 ## Evidence Campaign
 
-Run the baseline before the claimed method. Use identical data splits, evaluation code, budgets, and reporting. Then run main seeds, required ablations, robustness tests, and negative controls.
+Run matched baselines before claimed improvements. Hold data splits, evaluator, budgets, and
+reporting constant. Then run main evidence, multiple seeds or replications, causal ablations,
+negative controls, robustness, and adapter-specific tests.
 
-For adaptive exploration, each Codex turn should answer one question, submit the minimum experiment that distinguishes the alternatives, and hand off to PBS. Do not occupy a GPU while choosing the next hypothesis.
+For adaptive work, each turn answers one question and submits the minimum experiment that
+distinguishes alternatives. Release compute before agent reasoning. Use checkpoints sparingly and
+aggregate per-rank, per-example, per-sample, and per-seed output before durable publication.
 
-Use rolling checkpoints and keep only the best, latest resumable, and final audited checkpoint unless the research contract requires more. Aggregate per-rank, per-sample, and per-seed data before publishing to gdata.
+If a route requires human evaluation, the agent may generate a packed blinded study bundle and
+predeclared protocol, but must hand off to `waiting_human`. It must not create ratings, raters,
+consent, population descriptions, or preference results. Register `human_evaluation` with accepted
+assurance only from real completed evidence matching the schema in `adapter-system.md`. Bind the
+record to the current mission, route, active candidate, novelty audit, and packed evidence hash;
+after acceptance, hand off to `needs_agent` so autonomous work can resume.
 
-Stop or pivot when:
+Stop or pivot when the primary claim is falsified, gains disappear under matched controls,
+evaluation is invalid or contaminated, a required evidence source is unavailable, information per
+remaining SU is too low, repeated implementation failures expose a wrong assumption, or any
+approved budget/inode boundary approaches.
 
-- the primary claim is falsified
-- improvements disappear under matched baselines or multiple seeds
-- the metric/evaluator is invalid or contaminated
-- information gained per remaining SU is too low
-- repeated implementation failures expose an unavailable dependency
-- the campaign approaches any approved budget or inode limit
-
-Negative findings remain in the ledger and may support an honest diagnostic paper.
-
-Experiment registration and submission both revalidate novelty. `sanity` and `profile` may run
-before clearance; they test infrastructure and feasibility, not publishable novelty. A changed
-idea report, changed audit, or search older than 30 days invalidates later work until a new audit
-and new cold-review thread complete.
+Changing the mission is not a pivot; create a new campaign. Changing the route or portfolio
+invalidates downstream claim artifacts. Novelty searches older than 30 days must be refreshed.
 
 ## Review and Synthesis
 
-Run a cold experiment-integrity review against source paths, configs, raw metrics, and ledger. Check fake ground truth, leakage, selective reporting, score normalization, phantom results, insufficient scope, and mismatch between tracker and files.
+Run a cold integrity review against exact source commits, configs, raw metrics, ledgers, media
+manifests, and human-evidence provenance. Check fake ground truth, leakage, cherry-picking,
+normalization, unsupported perceptual claims, phantom results, insufficient scope, and tracker/file
+mismatch.
 
-Then build a claim-evidence table. Every number in `RESULTS.md` must trace to a machine-readable source. Report raw values, uncertainty, sample/seed counts, baseline delta, and failed conditions before interpretation.
+Build a claim-evidence graph. Every number in `RESULTS.md` traces to a machine-readable source and
+reports uncertainty, sample/seed counts, baseline delta, failed conditions, and applicable adapter
+limitations. A same-family semantic review remains provisional; only a different-family reviewer
+or deterministic verifier can record accepted assurance for what it actually verifies.
 
-A fresh same-family Codex reviewer is useful but `provisional`. Different-family review or a deterministic evaluator can be `accepted`. The executor never upgrades its own semantic verdict.
-
-Write `NARRATIVE_REPORT.md` containing problem, novelty evidence, method, experiment protocol, quantitative results, limitations, negative results, claim-evidence table, and figure/table inventory.
-
-Before final paper claims, rerun the novelty search when either novelty timestamp is older than
-30 days or new adjacent work appeared during the campaign. Completion revalidates both bound
-artifacts; do not hide a changed classification in limitations while retaining a method claim.
+Write `NARRATIVE_REPORT.md` with mission, discovered problem, candidate pivots, novelty evidence,
+method, protocol, results, limitations, negative results, claim-evidence table, and figure/table
+inventory. Ensure the final claim class remains permitted by the mission.
 
 ## Paper Handoff
 
-Proceed directly to paper writing after synthesis. For an unspecified venue, write a generic preprint and preserve separable style configuration. A later venue adaptation must not change scientific results.
+Proceed to English LaTeX only after synthesis. For an unspecified venue, write a generic preprint
+with separable style configuration. A venue adaptation must not alter scientific results.
 
-Read `paper-completion.md` before creating the paper plan. Record every canonical artifact with `campaign.py artifact`; do not rely on conversation memory.
+Read `paper-completion.md`. Generate figures from canonical data, compile from a clean build tree,
+and retain only final sources, bibliography, figures, and PDF. Register every canonical artifact
+with `campaign.py artifact`; conversation memory is not evidence.

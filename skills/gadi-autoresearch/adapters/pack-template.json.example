@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "pack_id": "example",
+  "title": "Example domain",
+  "description": "Replace this with the scientific scope of the new domain pack.",
+  "reference": "references/example-research.md",
+  "default_adapters": [],
+  "adapters": [
+    {
+      "id": "example.primary-task",
+      "kind": "task",
+      "title": "Primary task family",
+      "description": "Define the task family narrowly enough to change discovery and evidence.",
+      "reference": "references/example-research.md#task-families",
+      "required_evidence": [
+        "core.controlled-evidence"
+      ],
+      "discovery_questions": [
+        "Which reproducible domain condition exposes a mechanism-level failure?"
+      ],
+      "novelty_traps": [
+        "Renaming a generic method after the target domain without a domain-forced interaction."
+      ],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "example.model-family",
+      "kind": "model",
+      "title": "Model family",
+      "description": "Define the representation, interfaces, and bottlenecks that affect mechanisms.",
+      "reference": "references/example-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": [
+        "Which model interface loses information or dominates the observed cost?"
+      ],
+      "novelty_traps": [
+        "Treating a backbone swap as a new architecture."
+      ],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "example.domain-evaluation",
+      "kind": "evidence",
+      "title": "Domain evaluation",
+      "description": "Define the domain-specific evidence not covered by a core evidence adapter.",
+      "reference": "references/example-research.md#evidence",
+      "required_evidence": [],
+      "discovery_questions": [
+        "Which measurement directly distinguishes the proposed mechanism from its alternatives?"
+      ],
+      "novelty_traps": [
+        "Using an uncalibrated proxy as final evidence."
+      ],
+      "human_evaluation": "conditional"
+    }
+  ]
+}

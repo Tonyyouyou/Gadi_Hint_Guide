@@ -21,6 +21,8 @@ import campaign
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
 NOVELTY_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "novelty-audit.md"
+ADAPTER_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "adapter-system.md"
+WORKFLOW_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "research-workflow.md"
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 
@@ -115,11 +117,32 @@ def refresh_pbs(root: Path) -> None:
     pause_campaign(root, f"PBS refresh failed: {result.stderr.strip()}")
 
 
-def agent_prompt(root: Path) -> str:
+def agent_prompt(root: Path, state: dict[str, Any]) -> str:
+    route = state.get("route", {})
+    route_references = route.get("references") or ["references/adapter-system.md"]
+    absolute_references = [str(Path(__file__).resolve().parents[1] / reference.split("#", 1)[0]) for reference in route_references]
+    reference_packet = json.dumps(
+        {
+            "mission_sha256": state.get("mission_sha256"),
+            "route_status": route.get("status"),
+            "route_sha256": route.get("sha256"),
+            "selected_adapters": route.get("adapters", []),
+            "route_references": absolute_references,
+        },
+        indent=2,
+        sort_keys=True,
+    )
     return f"""Use $gadi-autoresearch and resume the approved campaign at {root}.
-Read campaign.json and the research workspace directly. Continue the full idea-to-paper workflow within the recorded project, SU, GPU, walltime, deadline, and persistent-file envelope. Use campaign.py for all experiment registration, previews, submissions, refreshes, artifacts, phases, and handoffs. Never call raw qsub/qdel, never compute on the login or persistent-session host, and never write workload data under .codex.
+Read MISSION.json, campaign.json, {ADAPTER_REFERENCE}, {WORKFLOW_REFERENCE}, and the research workspace directly. The mission is immutable and defines which final contribution classes are acceptable. Continue the evidence-led discovery-to-paper workflow within the recorded project, SU, GPU, walltime, deadline, and persistent-file envelope. Use campaign.py for route selection, experiment registration, previews, submissions, refreshes, artifacts, phases, and handoffs. Never call raw qsub/qdel, never compute on the login or persistent-session host, and never write workload data under .codex.
 
-Before planning or method experiments, read {NOVELTY_REFERENCE} and satisfy the machine-enforced novelty gate. Describe each candidate as mechanism primitives without its coined name, search exact/synonym/task/adjacent/combination/code/citation-neighbor routes, compare at least three checked primary sources, and write the bound IDEA_REPORT and NOVELTY_AUDIT.json artifacts. If the campaign predates this gate, stop implementation and move backward to novelty_review. Never write or register NOVELTY_REVIEW.json from the author thread: enter novelty_review and hand off with state needs_novelty_review so the controller launches a fresh adversarial reviewer. A rejected or application-only idea may continue only on its recorded diagnostic track; revise the idea before claiming a new method.
+Current adapter packet:
+{reference_packet}
+
+During territory and discovery, map task/model/lever/evidence opportunities, run only bounded observation probes, and resolve an explicit dependency-complete route with campaign.py route-set before portfolio. Inspect every selected adapter's required evidence, discovery questions, novelty traps, and linked references. Treat human_evaluation=conditional as a claim-dependent decision: any perceived-quality or preference claim must select the required perceptual/human evidence route before leaving discovery. Write one compact DISCOVERY_REPORT.md and a machine-readable CANDIDATE_PORTFOLIO.json with the mission-required number of viable candidates. Each candidate needs an observation, causal hypothesis, mechanism, predicted signature, falsifier, cheap distinguishing test, nearest-work delta, and estimated SU/job/file cost. Do not promote a branded idea without an observed or formally defined problem.
+
+Before planning or claim-bearing experiments, read {NOVELTY_REFERENCE} and satisfy the machine-enforced novelty gate. Bind the audit to the mission, route, candidate portfolio, and idea report. Describe the active candidate as mechanism primitives without its coined name, search exact/synonym/task/adjacent/combination/code/citation-neighbor routes, compare at least three checked primary sources, and write the bound IDEA_REPORT and NOVELTY_AUDIT.json artifacts. Never write or register NOVELTY_REVIEW.json from the author thread: enter novelty_review and hand off with state needs_novelty_review so the controller launches a fresh adversarial reviewer. If review rejects or returns a contribution class outside the mission, preserve the observation and return to discovery or portfolio. Never silently downgrade a requested method, architecture, objective, representation, system, data, evaluation, empirical, or theory contribution into an application, reproduction, or diagnostic paper.
+
+If the selected route requires human evaluation, generate only a packed blinded study bundle, predeclare the protocol, and hand off to waiting_human. Never invent ratings, listeners, consent, demographics, or human-study results. Keep all expanded audio/media samples in PBS jobfs and publish only bounded archives, manifests, aggregate metrics, and a small declared demo subset.
 
 Work until one of these is true: PBS work must be awaited, explicit human input is required, a scheduled wake is appropriate, a safety/budget condition requires pause, or every completion artifact is verified and the campaign can be completed. Before this Codex turn exits, call campaign.py handoff with the correct state and concrete reason. A missing handoff pauses the controller rather than spinning another agent turn."""
 
@@ -139,9 +162,9 @@ This is intentionally a fresh Codex thread. You are not the author and must not 
 
 {blind_packet}
 
-Browse primary sources and inspect full papers plus official code when available. Independently cover exact mechanism, synonyms, task-local work, adjacent fields, primitive combinations, code search, and backward/forward citations. Seek the earliest prior, closest prior, newest relevant prior, and an exact-combination prior. Apply the brand-substitution and A+B decomposition tests. Default to derivative or unresolved unless the remaining delta is a technically non-obvious mechanism or interaction, not a renamed application, engineering integration, metric choice, or scale-up.
+Browse primary sources and inspect full papers plus official code when available. Independently cover exact mechanism, synonyms, task-local work, adjacent fields, primitive combinations, code search, and backward/forward citations. Seek the earliest prior, closest prior, newest relevant prior, and an exact-combination prior. Apply the brand-substitution and A+B decomposition tests. Default to derivative or unresolved unless the remaining delta is technically non-obvious. A system, architecture, data, evaluation, empirical, or theory contribution may be valid when its mission-accepted claim and evidence standard are met; do not mislabel ordinary integration, metric choice, or scale-up as one.
 
-After fixing your independent source set and preliminary judgment, read the author artifacts, test the author's strongest rebuttal, and inspect additional cited sources where needed. Write the exact schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_REVIEW.json. Bind it to the recorded audit hash, include at least three independently checked primary sources and a comparison for every primitive, then register it with assurance provisional using campaign.py. Hand off to needs_agent with a concrete verdict. If a reliable review cannot be completed, hand off to waiting_human instead of guessing. The controller will reject the review if this thread matches the author thread, the audit changed, the source workspace changes, the schema is incomplete, an old review is reused, or the required handoff is absent. A fresh same-family review is process-independent but remains scientifically provisional."""
+After fixing your independent source set and preliminary judgment, read the mission, route, candidate portfolio, and author artifacts, test the author's strongest rebuttal, and inspect additional cited sources where needed. Classify the actual contribution even when it is outside the mission; the controller will force the author back to discovery rather than accepting a silent downgrade. Write the exact schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_REVIEW.json. Bind it to the recorded audit hash, include at least three independently checked primary sources and a comparison for every primitive, then register it with assurance provisional using campaign.py. Hand off to needs_agent with a concrete verdict. If a reliable review cannot be completed, hand off to waiting_human instead of guessing. The controller will reject the review if this thread matches the author thread, the audit changed, the source workspace changes, the schema is incomplete, an old review is reused, or the required handoff is absent. A fresh same-family review is process-independent but remains scientifically provisional."""
 
 
 def codex_prefix(
@@ -166,7 +189,7 @@ def codex_command(
     reasoning_effort: str | None = None,
 ) -> list[str]:
     thread_id = state["control"].get("thread_id")
-    prompt = agent_prompt(root)
+    prompt = agent_prompt(root, state)
     common = [
         *codex_prefix(codex_bin, model, reasoning_effort),
         "exec",
@@ -476,6 +499,46 @@ def run_novelty_reviewer(
                 "reviewed_audit_sha256": audit_sha256,
             })
             updated["control"]["novelty_review_thread_id"] = discovered_thread
+            try:
+                updated["research_track"] = campaign.novelty_resolution(updated)
+            except campaign.CampaignError as exc:
+                updated.pop("research_track", None)
+                if updated["mission"]["fallback_policy"] == "wait_human":
+                    fallback_phase = "novelty_review"
+                    updated["control"].update(
+                        {
+                            "state": "waiting_human",
+                            "reason": f"cold novelty review requires a user decision: {exc}",
+                        }
+                    )
+                else:
+                    portfolio = campaign.validate_candidate_portfolio(
+                        updated,
+                        campaign.artifact_file(updated, "candidate_portfolio"),
+                    )
+                    has_backup = any(
+                        candidate.get("status") == "backup"
+                        for candidate in portfolio["candidates"]
+                    )
+                    fallback_phase = "portfolio" if has_backup else "discovery"
+                    updated["phase"] = fallback_phase
+                    updated["control"].update(
+                        {
+                            "state": "needs_agent",
+                            "reason": (
+                                f"cold novelty review rejected or reclassified the active candidate: {exc}; "
+                                f"return to {fallback_phase}"
+                            ),
+                        }
+                    )
+                campaign.add_history(
+                    updated,
+                    "novelty_review_fallback",
+                    decision=campaign.json_object(review_path, "novelty review").get("decision"),
+                    claim_class=campaign.json_object(review_path, "novelty review").get("claim_class"),
+                    fallback_phase=fallback_phase,
+                    reason=str(exc),
+                )
         campaign.add_history(
             updated,
             "novelty_review_turn_finished",

@@ -22,7 +22,7 @@ Before using changed upstream behavior, inspect `git status`, record the new com
 
 | ARIS concept | Gadi autoresearch implementation |
 |---|---|
-| W1 idea discovery | literature, primitive-level candidates, structured novelty audit, controller-launched cold review, research contract |
+| W1 idea discovery | immutable mission, adapter territory, observation probes, competing candidate portfolio, structured novelty audit, controller-launched cold review |
 | W1.5 experiment bridge | implementation, code review, sanity-first, PBS experiment records |
 | W2 auto review | bounded evidence/review iterations with explicit stop and pivot rules |
 | W3 paper writing | plan, figures, LaTeX, compile, improvement, claim/citation audits |
@@ -31,9 +31,11 @@ Before using changed upstream behavior, inspect `git status`, record the new com
 | acceptance gate | same-family review provisional; deterministic/cross-family may accept |
 | experiment integrity | cold review of code and raw result paths before claim synthesis |
 
-The local novelty gate is stricter than a narrative W1 review: phase transitions, experiment
-stages, artifact hashes, current-search timestamps, and distinct author/reviewer thread IDs are
-machine checked. A positive review still means only plausibly novel, not proven unique.
+The local discovery and novelty gates are stricter than a narrative W1 review: mission contribution
+classes, adapter dependencies, candidate-count minimums, phase transitions, experiment stages,
+artifact hashes, current-search timestamps, and distinct author/reviewer thread IDs are machine
+checked. A rejected candidate returns to the portfolio or discovery rather than silently becoming a
+diagnostic paper. A positive review still means only plausibly novel, not proven unique.
 
 When a phase needs more detail, read only the corresponding upstream file, especially:
 

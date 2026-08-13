@@ -102,7 +102,12 @@ class ControllerTests(unittest.TestCase):
             code = controller.main(list(args))
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def prepare_novelty_review(self) -> Path:
+    def prepare_novelty_review(
+        self,
+        *,
+        decision: str = "plausibly_novel",
+        claim_class: str = "new_mechanism",
+    ) -> Path:
         idea = self.root / "IDEA_REPORT.md"
         idea.write_text("# Candidate\n\nAdaptive stability controls selective replay.\n", encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -115,6 +120,53 @@ class ControllerTests(unittest.TestCase):
                         "idea_report",
                         "--path",
                         str(idea),
+                        "--assurance",
+                        "provisional",
+                    ]
+                ),
+                0,
+            )
+        state = campaign.load_state(self.root)
+        portfolio = self.root / "CANDIDATE_PORTFOLIO.json"
+        portfolio.write_text(
+            json.dumps(
+                {
+                    "schema_version": campaign.PORTFOLIO_SCHEMA_VERSION,
+                    "mission_sha256": state["mission_sha256"],
+                    "route_sha256": state["route"]["sha256"],
+                    "created_at": campaign.utc_now(),
+                    "active_candidate_id": "candidate-one",
+                    "candidates": [
+                        {
+                            "id": f"candidate-{name}",
+                            "status": status,
+                            "observation": f"Observed behavior {name}.",
+                            "causal_hypothesis": f"Causal hypothesis {name}.",
+                            "mechanism": f"Mechanism {name}.",
+                            "predicted_signature": f"Prediction {name}.",
+                            "falsifier": f"Falsifier {name}.",
+                            "cheap_test": f"Cheap test {name}.",
+                            "nearest_work_delta": f"Prior-work delta {name}.",
+                            "estimated_cost": {"su": 1, "jobs": 1, "persistent_entries": 2},
+                        }
+                        for name, status in (("one", "active"), ("two", "backup"), ("three", "backup"))
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "artifact",
+                        str(self.root),
+                        "--name",
+                        "candidate_portfolio",
+                        "--path",
+                        str(portfolio),
                         "--assurance",
                         "provisional",
                     ]
@@ -145,6 +197,9 @@ class ControllerTests(unittest.TestCase):
                     "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
                     "candidate_id": "candidate-one",
                     "idea_report_sha256": campaign.sha256_file(idea),
+                    "mission_sha256": state["mission_sha256"],
+                    "route_sha256": state["route"]["sha256"],
+                    "candidate_portfolio_sha256": campaign.sha256_file(portfolio),
                     "searched_at": campaign.utc_now(),
                     "mechanism_without_brand": "Adaptive stability controls selective replay.",
                     "claim_class": "new_mechanism",
@@ -215,8 +270,8 @@ class ControllerTests(unittest.TestCase):
                     "audit_sha256": campaign.sha256_file(audit),
                     "reviewed_at": campaign.utc_now(),
                     "independent_context": True,
-                    "decision": "plausibly_novel",
-                    "claim_class": "new_mechanism",
+                    "decision": decision,
+                    "claim_class": claim_class,
                     "reviewer_searches": {
                         category: [f"reviewer {category} query"]
                         for category in campaign.NOVELTY_SEARCH_CATEGORIES
@@ -282,6 +337,10 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--add-dir") + 1], str(self.root))
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("--full-auto", command)
+        self.assertIn("MISSION.json", command[-1])
+        self.assertIn("Current adapter packet", command[-1])
+        self.assertIn("Never silently downgrade", command[-1])
+        self.assertIn("Never invent ratings", command[-1])
         state["control"]["thread_id"] = "thread-test"
         resumed = controller.codex_command("codex", self.workspace, state, self.root)
         self.assertLess(resumed.index("--approve-for-me"), resumed.index("resume"))
@@ -357,6 +416,29 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(state["control"]["novelty_review_thread_id"], "reviewer-thread")
         self.assertEqual(state["control"]["state"], "needs_agent")
         self.assertEqual(state["control"]["agent_turns"], 1)
+
+    def test_rejected_review_automatically_returns_to_portfolio(self) -> None:
+        review = self.prepare_novelty_review(decision="derivative", claim_class="new_application")
+        fake_codex = self.base / "fake-rejecting-reviewer-codex"
+        cli = SCRIPTS / "campaign.py"
+        fake_codex.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} artifact {shlex.quote(str(self.root))} "
+            f"--name novelty_review --path {shlex.quote(str(review))} --assurance provisional\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} handoff {shlex.quote(str(self.root))} "
+            "--state needs_agent --reason 'independent novelty review rejected candidate'\n"
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"rejecting-reviewer-thread\"}'\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        with mock.patch.object(controller.campaign, "live_preflight", return_value={}):
+            controller.run_novelty_reviewer(self.root, str(fake_codex))
+        state = campaign.load_state(self.root)
+        self.assertEqual(state["phase"], "portfolio")
+        self.assertEqual(state["control"]["state"], "needs_agent")
+        self.assertIn("return to portfolio", state["control"]["reason"])
+        self.assertNotIn("research_track", state)
 
     def test_missing_agent_handoff_pauses_instead_of_spinning(self) -> None:
         fake_codex = self.base / "fake-codex"

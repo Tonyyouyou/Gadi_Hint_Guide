@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "pack_id": "core",
+  "title": "Core Research",
+  "description": "Domain-independent task, model, research-lever, evidence, and governance adapters.",
+  "reference": "references/adapter-system.md",
+  "default_adapters": [
+    "core.inode-bounded"
+  ],
+  "adapters": [
+    {
+      "id": "core.open-task",
+      "kind": "task",
+      "title": "Open research task",
+      "description": "A task family that will be narrowed during evidence-led discovery.",
+      "reference": "references/adapter-system.md#route-resolution",
+      "required_evidence": ["core.controlled-evidence"],
+      "discovery_questions": ["Which reproducible failure, tension, or constraint defines the task?"],
+      "novelty_traps": ["Treating a renamed benchmark or domain transfer as a new task contribution."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.model-agnostic",
+      "kind": "model",
+      "title": "Model-agnostic investigation",
+      "description": "Research whose initial mechanism does not assume one model family.",
+      "reference": "references/adapter-system.md#route-resolution",
+      "required_evidence": [],
+      "discovery_questions": ["Which model assumptions are essential, and which should remain variable?"],
+      "novelty_traps": ["Claiming model generality after testing one architecture."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.data",
+      "kind": "lever",
+      "title": "Data and curriculum",
+      "description": "Data construction, filtering, synthesis, augmentation, curricula, and sampling research.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.controlled-evidence"],
+      "discovery_questions": ["Which distributional defect or supervision bottleneck is causally limiting performance?"],
+      "novelty_traps": ["Scaling data or applying standard filtering without a new mechanism or resource claim."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.representation",
+      "kind": "lever",
+      "title": "Representation and tokenization",
+      "description": "Learned representations, tokenizers, codecs, discretization, and compression interfaces.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.controlled-evidence"],
+      "discovery_questions": ["What information is discarded, duplicated, or made difficult to optimize by the representation?"],
+      "novelty_traps": ["Replacing one existing tokenizer or encoder without isolating a new interaction."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.architecture",
+      "kind": "lever",
+      "title": "Architecture",
+      "description": "New modules, connectivity, memory, routing, hierarchy, and cross-component interfaces.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.controlled-evidence"],
+      "discovery_questions": ["Which measured information-flow or capacity mismatch motivates an architectural intervention?"],
+      "novelty_traps": ["A familiar block diagram assembled from known modules without a non-obvious interaction."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.optimization-rl",
+      "kind": "lever",
+      "title": "Optimization, post-training, and RL",
+      "description": "Objectives, credit assignment, preference learning, reward models, and optimization dynamics.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.controlled-evidence", "core.optimization-dynamics"],
+      "discovery_questions": ["Which learning dynamic, reward mismatch, or credit-assignment failure is reproducible?"],
+      "novelty_traps": ["Adding domain branding to PPO, DPO, distillation, or a standard loss reweighting."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.generation-control",
+      "kind": "lever",
+      "title": "Generation, decoding, and control",
+      "description": "Sampling, decoding, conditioning, editing, controllability, and structured generation.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.controlled-evidence"],
+      "discovery_questions": ["Where does the generation process lose conditioning, structure, diversity, or controllability?"],
+      "novelty_traps": ["Prompt engineering or sampler tuning presented as a new generation method."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.systems",
+      "kind": "lever",
+      "title": "Efficiency and systems",
+      "description": "Algorithms, kernels, compilers, serving, scheduling, compression, and hardware co-design.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.system-measurement"],
+      "discovery_questions": ["Which measured stage dominates cost in which workload and hardware regimes?"],
+      "novelty_traps": ["Component speedup without an end-to-end ceiling, matched quality, or a new system interaction."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.robustness",
+      "kind": "lever",
+      "title": "Robustness and generalization",
+      "description": "Distribution shift, low-resource transfer, adversarial conditions, calibration, and reliability.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.controlled-evidence"],
+      "discovery_questions": ["Which controlled shift exposes a stable and consequential failure?"],
+      "novelty_traps": ["Adding another corruption benchmark without a mechanism or validated evaluation contribution."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.safety-governance",
+      "kind": "lever",
+      "title": "Safety, privacy, and governance",
+      "description": "Misuse, privacy, provenance, memorization, fairness, and responsible deployment research.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.safety-evidence"],
+      "discovery_questions": ["What concrete threat model and observable harm define the research question?"],
+      "novelty_traps": ["Generic safety discussion without a threat model, attack, defense, or measurement contribution."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.evaluation-science",
+      "kind": "lever",
+      "title": "Evaluation and empirical science",
+      "description": "Benchmarks, metrics, reproducible phenomena, scaling laws, diagnostics, and causal analysis.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.empirical-discovery"],
+      "discovery_questions": ["Which accepted metric, benchmark, or empirical assumption fails under a controlled test?"],
+      "novelty_traps": ["Metric proliferation or profiling that does not reveal a general and consequential phenomenon."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.theory",
+      "kind": "lever",
+      "title": "Theory and formal analysis",
+      "description": "Formal objectives, guarantees, bounds, identifiability, and explanatory models.",
+      "reference": "references/adapter-system.md#adapter-contract",
+      "required_evidence": ["core.formal-evidence"],
+      "discovery_questions": ["Which assumption mismatch or unexplained invariant supports a precise formal problem?"],
+      "novelty_traps": ["A renamed theorem or bound whose proof and assumptions are unchanged from prior work."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.controlled-evidence",
+      "kind": "evidence",
+      "title": "Controlled experimental evidence",
+      "description": "Matched baselines, real ground truth, seeds, ablations, negative controls, and stress tests.",
+      "reference": "references/research-workflow.md#evidence-campaign",
+      "required_evidence": [],
+      "discovery_questions": ["What cheapest controlled experiment distinguishes the causal alternatives?"],
+      "novelty_traps": ["Treating one positive pilot or an unmatched baseline as publishable evidence."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.optimization-dynamics",
+      "kind": "evidence",
+      "title": "Optimization-dynamics evidence",
+      "description": "Reward validity, learning curves, collapse, KL and entropy, credit assignment, and seed stability.",
+      "reference": "references/research-workflow.md#evidence-campaign",
+      "required_evidence": [],
+      "discovery_questions": ["Which training signal separates optimization failure from data or evaluator failure?"],
+      "novelty_traps": ["Reporting final quality without diagnosing reward hacking or training instability."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.system-measurement",
+      "kind": "evidence",
+      "title": "System measurement",
+      "description": "Synchronized stage timing, warmup, memory, throughput, latency, cost, and end-to-end ceilings.",
+      "reference": "references/research-workflow.md#evidence-campaign",
+      "required_evidence": [],
+      "discovery_questions": ["Does the bottleneck persist across workload, model, and hardware regimes?"],
+      "novelty_traps": ["Unsynchronized microbenchmarks or component-only speedups."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.empirical-discovery",
+      "kind": "evidence",
+      "title": "Empirical-discovery evidence",
+      "description": "Predeclared phenomenon, cross-setting replication, falsifiers, and claim ceilings.",
+      "reference": "references/research-workflow.md#evidence-campaign",
+      "required_evidence": [],
+      "discovery_questions": ["What observation would make the claimed phenomenon disappear?"],
+      "novelty_traps": ["Post-hoc slice mining or diagnostic observations presented as universal findings."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.formal-evidence",
+      "kind": "evidence",
+      "title": "Formal evidence",
+      "description": "Definitions, assumptions, proof obligations, counterexamples, and executable checks where possible.",
+      "reference": "references/research-workflow.md#evidence-campaign",
+      "required_evidence": [],
+      "discovery_questions": ["Which lemma, counterexample, or formal check is the shortest decisive witness?"],
+      "novelty_traps": ["Informal intuition presented as a theorem or guarantee."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "core.safety-evidence",
+      "kind": "evidence",
+      "title": "Safety and governance evidence",
+      "description": "Explicit threat models, attack/defense protocols, subgroup analysis, provenance, and harm bounds.",
+      "reference": "references/research-workflow.md#evidence-campaign",
+      "required_evidence": [],
+      "discovery_questions": ["Which attack, misuse case, or affected population makes the harm measurable?"],
+      "novelty_traps": ["Safety claims based only on benign benchmark averages."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "core.human-evaluation",
+      "kind": "evidence",
+      "title": "Human evaluation",
+      "description": "Blinded, randomized, documented human judgments with appropriate consent and statistical analysis.",
+      "reference": "references/adapter-system.md#human-evidence",
+      "required_evidence": [],
+      "discovery_questions": ["Which claim cannot be validated by a calibrated objective measure?"],
+      "novelty_traps": ["Invented ratings, unblinded cherry-picked examples, or undocumented evaluator populations."],
+      "human_evaluation": "required"
+    },
+    {
+      "id": "core.inode-bounded",
+      "kind": "constraint",
+      "title": "Inode-bounded persistence",
+      "description": "Build and expand in jobfs, then publish a small number of packed durable artifacts.",
+      "reference": "references/campaign-contract.md#state-and-file-count-behavior",
+      "required_evidence": [],
+      "discovery_questions": ["Can every dataset, environment, sample bundle, checkpoint, and log remain within the file envelope?"],
+      "novelty_traps": ["Treating an expanded persistent tree as an acceptable implementation shortcut."],
+      "human_evaluation": "never"
+    }
+  ]
+}

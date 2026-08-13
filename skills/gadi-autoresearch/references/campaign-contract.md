@@ -2,17 +2,38 @@
 
 ## Contents
 
-1. Storage and approval
-2. Environment and data staging
-3. Skill revision and novelty gate
+1. Storage, mission, and approval
+2. Adapter route and skill revision
+3. Environment and data staging
 4. Experiment registration
 5. Batch and interactive execution
 6. Monitoring and handoff
 7. State and file-count behavior
 
-## Storage and Approval
+## Storage, Mission, and Approval
 
-`campaign.json` is the single durable control record. `campaign.lock` protects atomic updates. Research artifacts live beside it or in a small, separate Git workspace below `/g/data/wa66/Xiangyu`; neither source nor artifacts may use HOME. Codex session records remain under `.codex`, but no workload artifact may enter `.codex`.
+`campaign.json` is the single durable control record. `campaign.lock` protects atomic updates.
+`MISSION.json` is the immutable user-intent artifact. Research artifacts live beside them or in a
+small, separate Git workspace below `/g/data/wa66/Xiangyu`; neither source nor artifacts may use
+HOME. Codex session records remain under `.codex`, but no workload artifact may enter `.codex`.
+
+Translate natural language into the schema in `adapter-system.md`. Use a reviewed mission file for
+an extensible domain campaign:
+
+```bash
+"$PYTHON" "$CAMPAIGN" init "$ROOT" \
+  --campaign-id audio-open-research \
+  --mission-file /absolute/path/MISSION.json \
+  --workspace /g/data/wa66/Xiangyu/WORKSPACE \
+  --projects wa66,ey69,po67,iv96 \
+  --max-su 5000 --max-jobs 24 --max-concurrent 2 --max-gpus 2 \
+  --max-files 512 --max-agent-turns 60 \
+  --deadline 2026-09-15T00:00:00Z
+```
+
+For a generic directed campaign, `--idea` remains a shorthand that creates a core-only mission.
+Use `--domain-pack audio` to delegate Audio route selection. Add `--allow-diagnostic-final` only
+when the user explicitly accepts application/reproduction/diagnostic work as the final output.
 
 Initialize a draft before charged work. The proposed envelope contains:
 
@@ -36,7 +57,28 @@ Run current account/inode checks:
 
 The four compute projects are dynamic allocations, not storage spill areas. Persistent campaign data stays in `wa66`; each experiment's charging project must scientifically cover that work.
 
-## Skill Revision and Novelty Gate
+## Adapter Route and Skill Revision
+
+The adapter registry is data-driven. Validate and inspect it with:
+
+```bash
+"$PYTHON" "$SKILL/scripts/adapter_registry.py" validate
+"$PYTHON" "$SKILL/scripts/adapter_registry.py" list --pack audio
+```
+
+When the mission delegates route selection, `route-set` is allowed only in `territory` or
+`discovery`. It requires at least one task, model, lever, and evidence adapter; adds pack defaults;
+checks evidence dependencies and human-evaluation policy; and stores the route plus registry hash:
+
+```bash
+"$PYTHON" "$CAMPAIGN" route-set "$ROOT" \
+  --adapters audio.speech-understanding,audio.encoder-discriminative,core.systems,core.system-measurement,audio.reference-task-evaluation \
+  --reason "stage-wise evidence identifies a reproducible encoder-system opportunity"
+```
+
+Changing a route invalidates portfolio and later claim artifacts. A changed adapter registry also
+changes the pinned skill tree. Explicit `skill-adopt` updates the registry pin, returns the campaign
+to discovery when necessary, and invalidates route-bound evidence instead of silently migrating it.
 
 `campaign.json` pins the Git commit and tree hash of this skill. The controller pauses if the
 installed revision changes. This prevents an unattended campaign from silently acquiring new
@@ -49,9 +91,10 @@ and pause or hand off to the user (an unapproved draft is already eligible):
 "$PYTHON" "$CAMPAIGN" resume "$ROOT" --reason "new skill revision adopted"
 ```
 
-Forward phase changes advance exactly one phase. Backward pivots are allowed with a reason.
-Planning and later phases require the bound novelty artifacts described in
-`novelty-audit.md`. The author requests the controller-only reviewer with:
+Forward phase changes advance exactly one phase. Backward pivots are allowed with a reason. The
+phase order begins `territory -> discovery -> portfolio -> novelty_review -> planning`. Planning
+and later phases require mission/route/portfolio-bound novelty artifacts. The author requests the
+controller-only reviewer with:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state needs_novelty_review \
@@ -60,7 +103,9 @@ Planning and later phases require the bound novelty artifacts described in
 
 The control state `novelty_reviewer_running` cannot change phases, approval, storage, or
 experiments and may record only `novelty_review`. The controller supplies the cold-review
-attestation after verifying a distinct thread and unchanged audit.
+attestation after verifying a distinct thread and unchanged audit. A rejected, changed, or
+mission-incompatible candidate is returned to `portfolio` when a backup exists, otherwise
+`discovery`.
 
 ## Environment and Data Staging
 
@@ -94,11 +139,10 @@ After the job succeeds, record the published storage object:
 
 Never persist an expanded conda/venv, pip cache, Hugging Face cache, extracted sample tree, or compilation directory.
 
-The first command is available while ideas are being audited because it has no scheduler or
-storage side effect. `--execute` requires both `allow_storage_publish` and a resolved novelty
-classification. Build or acquire persistent inputs only for a method or diagnostic track that
-survived cold review; do not spend copyq SU or create durable objects merely to make an idea
-feel concrete.
+The preview command is available during discovery because it has no scheduler or
+storage side effect. `--execute` requires both `allow_storage_publish` and a mission-compatible
+novelty resolution. Build or acquire persistent inputs only for a contribution that survived cold
+review; do not spend copyq SU or create durable objects merely to make an idea feel concrete.
 
 ## Experiment Registration
 
@@ -126,13 +170,16 @@ The job runs through `run_sqsh.sh`; HOME, source, data, environments, `.codex`, 
 
 Stages are evidence classes, not labels chosen to bypass review:
 
-- `sanity`, `profile`: infrastructure or feasibility checks; novelty clearance is not required
-- `baseline`, `audit`, `paper`: require a resolved method or diagnostic classification
-- `pilot`, `main`, `ablation`: require the cold reviewer to permit a new mechanism or new combination
+- `discovery`, `profile`: bounded observation or feasibility probes; novelty clearance is not required
+- `sanity`: infrastructure and real-path witness; novelty clearance is not required
+- `baseline`, `audit`, `paper`: require a mission-compatible resolved contribution
+- `pilot`, `main`, `ablation`: require a cold-reviewed mission-accepted primary contribution
 
 The CLI checks the classification when the experiment is registered and again immediately
 before batch or interactive submission. A stale or changed artifact therefore blocks a
-previously registered experiment.
+previously registered experiment. Every claim-bearing experiment also stores the exact mission,
+route, portfolio, active candidate, idea, novelty-audit, novelty-review, and claim-class hashes;
+after any pivot, register a new experiment instead of relabelling or resubmitting the old one.
 
 For later work, declare dependencies and an evidence stage:
 
@@ -252,4 +299,4 @@ resumed only with an explicit reason:
 - The file budget also reserves result objects/directories, combined PBS logs, and bounded controller state rather than counting only scientific output files.
 - The campaign compares current campaign entries, new files added to the Git workspace since initialization, published environment/data objects, planned outputs, and control-file reserve against the approved persistent-file ceiling and live `wa66` inode headroom.
 - The controller keeps at most `controller.log` and `controller.previous.log`.
-- Novelty state adds two compact JSON artifacts inside the existing envelope, not paper/PDF caches or one file per query.
+- Mission, route, portfolio, and novelty state use a fixed number of compact records, not per-query traces.

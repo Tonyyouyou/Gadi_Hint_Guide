@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "pack_id": "audio",
+  "title": "Audio AI",
+  "description": "Composable adapters for speech, general audio, music, signal processing, and audio-language research.",
+  "reference": "references/audio-research.md",
+  "default_adapters": [
+    "audio.packed-media",
+    "audio.content-leakage"
+  ],
+  "adapters": [
+    {
+      "id": "audio.speech-understanding",
+      "kind": "task",
+      "title": "Speech understanding",
+      "description": "ASR, speech translation, diarization, speaker/language/emotion recognition, and spoken-language understanding.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.reference-task-evaluation"],
+      "discovery_questions": ["Which acoustic, linguistic, temporal, speaker, or domain condition creates a stable error mode?"],
+      "novelty_traps": ["Applying a generic language or vision method to ASR without an audio-forced interaction."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "audio.speech-generation",
+      "kind": "task",
+      "title": "Speech generation",
+      "description": "TTS, voice conversion, expressive speech, singing voice, and controllable synthesis.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.reference-task-evaluation"],
+      "discovery_questions": ["Where do intelligibility, identity, prosody, emotion, duration, or naturalness diverge?"],
+      "novelty_traps": ["Optimizing a proxy metric without calibrated perceptual evidence."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.speech-interaction",
+      "kind": "task",
+      "title": "Interactive speech systems",
+      "description": "Speech-to-speech, real-time dialogue, duplex interaction, interruption, and turn-taking.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.interactive-streaming-evaluation"],
+      "discovery_questions": ["Which perception, reasoning, generation, or scheduling stage breaks natural interaction?"],
+      "novelty_traps": ["Reporting isolated model latency while ignoring end-to-end conversational timing."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.general-understanding",
+      "kind": "task",
+      "title": "General audio understanding",
+      "description": "Acoustic events, captioning, audio QA, temporal grounding, scene analysis, and spatial understanding.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.reference-task-evaluation"],
+      "discovery_questions": ["Which temporal, spatial, polyphonic, or semantic relation is systematically missed?"],
+      "novelty_traps": ["Treating label-space expansion as a new understanding mechanism."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.general-generation",
+      "kind": "task",
+      "title": "General audio generation and editing",
+      "description": "Text-to-audio, Foley, sound effects, continuation, inpainting, editing, and spatial audio generation.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": [],
+      "discovery_questions": ["Where do prompt alignment, event timing, acoustic quality, diversity, or edit locality fail?"],
+      "novelty_traps": ["Selecting attractive samples or relying on one embedding score."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.music-understanding",
+      "kind": "task",
+      "title": "Music understanding",
+      "description": "Transcription, retrieval, structure, tagging, source analysis, and music information retrieval.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.reference-task-evaluation", "audio.music-structure-evaluation"],
+      "discovery_questions": ["Which rhythmic, harmonic, structural, instrumental, or cultural factor breaks representation transfer?"],
+      "novelty_traps": ["Claiming universal music understanding from one Western genre or corpus."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.music-generation",
+      "kind": "task",
+      "title": "Music generation and production",
+      "description": "Text- or music-conditioned composition, accompaniment, multitrack production, song generation, editing, and long-form audio music.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": [],
+      "discovery_questions": ["Where do long-range form, motif, rhythm, harmony, instrumentation, control, or originality break?"],
+      "novelty_traps": ["Short cherry-picked clips, culturally narrow metrics, or prompt alignment mistaken for musical quality."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.signal-processing",
+      "kind": "task",
+      "title": "Audio restoration, separation, and coding",
+      "description": "Enhancement, denoising, dereverberation, separation, bandwidth extension, neural codecs, and restoration.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.signal-reference-evaluation"],
+      "discovery_questions": ["Which distortion, interference, bitrate, or domain regime exposes a perceptually meaningful failure?"],
+      "novelty_traps": ["Optimizing a distortion metric that conflicts with perception or downstream utility."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.language-multimodal",
+      "kind": "task",
+      "title": "Audio-language and multimodal models",
+      "description": "AudioLLMs, speech language models, audio-visual models, agents, temporal grounding, and audio reasoning.",
+      "reference": "references/audio-research.md#task-families",
+      "required_evidence": ["audio.reference-task-evaluation"],
+      "discovery_questions": ["Which information is lost or misused across encoder, connector, language model, and generation interfaces?"],
+      "novelty_traps": ["Attaching an existing encoder to an LLM and treating integration as a new reasoning method."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.encoder-discriminative",
+      "kind": "model",
+      "title": "Encoder and discriminative model",
+      "description": "Audio frontends, encoders, classifiers, CTC-style heads, and representation models.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["How do temporal resolution, depth, receptive field, and representation redundancy affect the task?"],
+      "novelty_traps": ["Assuming the encoder is the bottleneck before stage-wise measurement."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "audio.seq2seq",
+      "kind": "model",
+      "title": "Encoder-decoder and sequence-to-sequence",
+      "description": "Attention or transducer systems that map acoustic sequences to text, labels, or acoustic outputs.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["Which alignment, exposure, latency, or cross-attention behavior limits the system?"],
+      "novelty_traps": ["Importing a standard sequence model without an audio-specific mechanism."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.continuous-generation",
+      "kind": "model",
+      "title": "Continuous waveform or spectrogram generation",
+      "description": "Models that directly or hierarchically generate continuous acoustic representations.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["Where do phase, high-frequency detail, long-range structure, and conditioning interact?"],
+      "novelty_traps": ["Spectral reconstruction gains without perceptual or task evidence."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.codec-autoregressive",
+      "kind": "model",
+      "title": "Codec-token autoregressive generation",
+      "description": "Autoregressive language models over one or more neural audio-codec streams.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["How do codebook delay, sequence length, hierarchy, and exposure error affect generation?"],
+      "novelty_traps": ["Reordering known codec streams without a measured modeling or systems consequence."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.masked-token-generation",
+      "kind": "model",
+      "title": "Masked and iterative token generation",
+      "description": "Parallel or iterative masked prediction over symbolic or codec representations.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["Which confidence schedule, dependency, or refinement order limits quality and speed?"],
+      "novelty_traps": ["Reusing an image or text masking schedule without audio-structured evidence."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.diffusion-flow",
+      "kind": "model",
+      "title": "Diffusion and flow generation",
+      "description": "Discrete or continuous diffusion, score models, flow matching, and iterative acoustic generation.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["Which solver, noise path, conditioning, or representation causes the quality-speed tradeoff?"],
+      "novelty_traps": ["Changing sampler steps without a new solver, objective, or audio-dependent mechanism."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.vocoder-codec",
+      "kind": "model",
+      "title": "Vocoder and neural codec",
+      "description": "Waveform decoders, residual quantizers, tokenizers, and acoustic rendering stages.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": [],
+      "discovery_questions": ["Which bitrate, codebook, decoder, or domain factor controls perceptual and downstream loss?"],
+      "novelty_traps": ["Reporting reconstruction metrics without downstream or perceptual validation."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.hybrid-streaming",
+      "kind": "model",
+      "title": "Hybrid, cascaded, and streaming system",
+      "description": "Multi-stage speech/audio pipelines, streaming models, and mixed generative architectures.",
+      "reference": "references/audio-research.md#model-families",
+      "required_evidence": ["audio.interactive-streaming-evaluation"],
+      "discovery_questions": ["Which interface, buffer, scheduler, or error propagation dominates end-to-end behavior?"],
+      "novelty_traps": ["Optimizing one stage while ignoring cascade quality and latency."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.generative-quality-control",
+      "kind": "lever",
+      "title": "Perceptual generation quality and control",
+      "description": "Objectives, architectures, decoding, and controls that claim to change perceived generated-audio behavior.",
+      "reference": "references/audio-research.md#research-routes",
+      "required_evidence": ["core.controlled-evidence", "audio.perceptual-generation-evaluation", "core.human-evaluation"],
+      "discovery_questions": ["Which reproducible perceptual or controllability failure is not explained by current objective metrics?"],
+      "novelty_traps": ["Claiming quality or control from uncalibrated proxies or selected examples."],
+      "human_evaluation": "required"
+    },
+    {
+      "id": "audio.preference-optimization",
+      "kind": "lever",
+      "title": "Audio preference optimization and RL",
+      "description": "Reward, preference, policy, and credit-assignment methods for perceptual audio generation.",
+      "reference": "references/audio-research.md#research-routes",
+      "required_evidence": ["core.controlled-evidence", "core.optimization-dynamics", "audio.perceptual-generation-evaluation", "core.human-evaluation"],
+      "discovery_questions": ["Where do perception, reward, temporal credit, identity, structure, and language conditioning disagree?"],
+      "novelty_traps": ["A generic PPO or DPO recipe with an audio reward-model label."],
+      "human_evaluation": "required"
+    },
+    {
+      "id": "audio.reference-task-evaluation",
+      "kind": "evidence",
+      "title": "Reference-based audio task evaluation",
+      "description": "Ground-truth recognition, translation, tagging, localization, or downstream task evidence with slice analysis.",
+      "reference": "references/audio-research.md#evidence-protocols",
+      "required_evidence": [],
+      "discovery_questions": ["Which duration, language, speaker, overlap, noise, event, or domain slices alter the result?"],
+      "novelty_traps": ["One aggregate metric hiding leakage, subgroup failures, or model-specific behavior."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "audio.signal-reference-evaluation",
+      "kind": "evidence",
+      "title": "Signal-reference and downstream evaluation",
+      "description": "Matched signal metrics combined with perceptual or downstream-task validation.",
+      "reference": "references/audio-research.md#evidence-protocols",
+      "required_evidence": [],
+      "discovery_questions": ["Do signal distortion, perception, and downstream utility agree across conditions?"],
+      "novelty_traps": ["Optimizing a metric used in training and treating it as independent evaluation."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.perceptual-generation-evaluation",
+      "kind": "evidence",
+      "title": "Perceptual generation evaluation",
+      "description": "Quality, intelligibility, identity, alignment, controllability, diversity, and preference evidence for generated audio.",
+      "reference": "references/audio-research.md#human-and-perceptual-evidence",
+      "required_evidence": ["core.human-evaluation"],
+      "discovery_questions": ["Which perceptual claim lacks a calibrated objective surrogate?"],
+      "novelty_traps": ["Unvalidated proxy metrics or cherry-picked listening examples."],
+      "human_evaluation": "required"
+    },
+    {
+      "id": "audio.interactive-streaming-evaluation",
+      "kind": "evidence",
+      "title": "Interactive and streaming evaluation",
+      "description": "First response, real-time factor, interruption, buffering, quality, throughput, and end-to-end interaction evidence.",
+      "reference": "references/audio-research.md#evidence-protocols",
+      "required_evidence": ["core.system-measurement"],
+      "discovery_questions": ["How do latency and quality change with duration, chunking, load, and interruptions?"],
+      "novelty_traps": ["Offline average latency presented as interactive performance."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.music-structure-evaluation",
+      "kind": "evidence",
+      "title": "Musical structure evaluation",
+      "description": "Rhythm, harmony, motif, form, instrumentation, long-range coherence, style, and cross-cultural evidence.",
+      "reference": "references/audio-research.md#evidence-protocols",
+      "required_evidence": [],
+      "discovery_questions": ["Which local and long-range musical properties are independently measured?"],
+      "novelty_traps": ["Short clips or Western-only descriptors presented as general musical quality."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.safety-memorization-evaluation",
+      "kind": "evidence",
+      "title": "Audio safety, identity, and memorization evaluation",
+      "description": "Near-duplicate leakage, speaker identity, copyrighted content, watermarking, provenance, and misuse evidence.",
+      "reference": "references/audio-research.md#safety-and-integrity",
+      "required_evidence": ["core.safety-evidence"],
+      "discovery_questions": ["Can the output reproduce protected content, identity, or training examples beyond the declared threat model?"],
+      "novelty_traps": ["Safety conclusions from prompt refusal alone or filename-level deduplication."],
+      "human_evaluation": "conditional"
+    },
+    {
+      "id": "audio.packed-media",
+      "kind": "constraint",
+      "title": "Packed audio artifacts",
+      "description": "Generate samples in jobfs and persist archives, manifests, aggregate metrics, and a small curated listening bundle.",
+      "reference": "references/audio-research.md#inode-safe-audio",
+      "required_evidence": [],
+      "discovery_questions": ["Can generated samples and evaluation features be consolidated before durable publication?"],
+      "novelty_traps": ["Publishing one persistent file per utterance, prompt, seed, or generated sample."],
+      "human_evaluation": "never"
+    },
+    {
+      "id": "audio.content-leakage",
+      "kind": "constraint",
+      "title": "Content-level leakage control",
+      "description": "Deduplicate and split by content, speaker, recording, song, stem, prompt source, and near-neighbor evidence.",
+      "reference": "references/audio-research.md#safety-and-integrity",
+      "required_evidence": [],
+      "discovery_questions": ["Which identities or near-duplicate content can cross train, selection, and evaluation boundaries?"],
+      "novelty_traps": ["File-name deduplication or random clip splits treated as contamination control."],
+      "human_evaluation": "never"
+    }
+  ]
+}

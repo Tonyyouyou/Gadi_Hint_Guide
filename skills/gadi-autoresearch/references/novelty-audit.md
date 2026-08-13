@@ -10,7 +10,9 @@
 
 ## Purpose
 
-Novelty is a claim to test, not a name to trust. Separate these questions:
+Novelty is a claim to test, not a name to trust. Apply it to algorithms, objectives,
+representations, architectures, systems, data resources, evaluation protocols, empirical findings,
+and theory. Separate these questions:
 
 1. Does the mechanism work?
 2. Is the mechanism new?
@@ -20,7 +22,8 @@ A useful transfer from another field is not automatically a new method. Classify
 `new_application` unless the target setting forces a technically non-obvious mechanism or
 interaction that the source-field method did not contain.
 
-The author performs a structured audit. The controller then starts a fresh Codex thread for
+The mission decides which contribution classes may be final. The author performs a structured audit
+of the active portfolio candidate. The controller then starts a fresh Codex thread for
 an adversarial review. The new thread is context-independent from the author thread, but a
 same-family semantic verdict remains `provisional` scientific assurance.
 
@@ -56,15 +59,18 @@ Apply two explicit falsification tests:
 
 ## Author Artifact
 
-Write `IDEA_REPORT.md` first and record it as `idea_report`. Then write
+Write and register `CANDIDATE_PORTFOLIO.json`, then `IDEA_REPORT.md`. Write
 `NOVELTY_AUDIT.json` with this exact schema and register it as `provisional`. Timestamps must
 be UTC ISO-8601 and no more than 30 days old.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "candidate_id": "safe-short-id",
   "idea_report_sha256": "sha256-of-recorded-IDEA_REPORT.md",
+  "mission_sha256": "canonical-sha256-recorded-in-campaign.json",
+  "route_sha256": "sha256-of-current-adapter-route",
+  "candidate_portfolio_sha256": "sha256-of-recorded-CANDIDATE_PORTFOLIO.json",
   "searched_at": "2026-08-13T00:00:00Z",
   "mechanism_without_brand": "Functional mechanism with no coined method or task name.",
   "claim_class": "new_mechanism",
@@ -146,9 +152,16 @@ be UTC ISO-8601 and no more than 30 days old.
 ```
 
 Allowed `verdict` values are `plausibly_novel`, `derivative`, `application_only`,
-`reproduction_only`, `unresolved`, and `rejected`. Allowed `claim_class` values are
-`new_mechanism`, `new_combination`, `new_application`, `reproduction`, `diagnostic`, and
-`unresolved`.
+`reproduction_only`, `unresolved`, and `rejected`. Allowed `claim_class` values are:
+
+- primary: `new_mechanism`, `new_combination`, `new_architecture`, `new_objective`,
+  `new_representation`, `new_system`, `new_data_resource`, `new_evaluation_protocol`,
+  `new_empirical_finding`, or `new_theory`
+- fallback: `new_application`, `reproduction`, or `diagnostic`
+- unresolved: `unresolved`
+
+The author may audit only a non-unresolved class accepted by the mission. The fresh reviewer may
+reclassify it outside the mission; that evidence triggers fallback rather than being suppressed.
 
 Register and request cold review:
 
@@ -176,7 +189,7 @@ be `null`, and its `conclusion` must explain that the exact combination was not 
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "candidate_id": "safe-short-id",
   "audit_sha256": "sha256-of-recorded-NOVELTY_AUDIT.json",
   "reviewed_at": "2026-08-13T00:00:00Z",
@@ -261,14 +274,15 @@ The reviewer registers this artifact with `--assurance provisional` and hands of
 
 | Review outcome | Permitted work |
 |---|---|
-| `plausibly_novel` + `new_mechanism` or `new_combination` | Method track: pilot, main, ablation |
-| Resolved `new_application`, `reproduction`, or `diagnostic` | Diagnostic baseline/audit/paper only; no new-method claim |
-| `unresolved` or `rejected` | Return to ideas, revise the mechanism, and repeat both searches |
+| `plausibly_novel` + mission-accepted primary class | Claim-bearing pilot, main, and ablation under the matching adapter evidence protocol |
+| Mission explicitly permits the resolved fallback class | Application/reproduction/diagnostic baseline, audit, and paper only |
+| Rejected, unresolved, required changes, or class outside mission | Controller returns to portfolio when a backup exists, otherwise discovery |
 
-`sanity` and `profile` experiments may run before the gate because they test infrastructure or
-feasibility with existing frozen inputs. Environment/data scripts may be previewed, but new
+`discovery`, `sanity`, and `profile` experiments may run before the gate because they generate
+bounded observations or test infrastructure/feasibility with existing frozen inputs. Environment/data scripts may be previewed, but new
 persistent storage jobs also wait for a resolved classification. All later experiment
 registration and submission revalidate the bound artifacts.
-Changing the idea report invalidates the audit; changing the audit invalidates the review. A
+Changing the mission requires a new campaign. Changing the route or portfolio invalidates later
+claim artifacts. Changing the idea report invalidates the audit; changing the audit invalidates the review. A
 review older than 30 days blocks later work and final completion until the search is refreshed
 through a new audit and a new fresh reviewer thread.

@@ -21,12 +21,17 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+import adapter_registry
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PHASES = (
     "intake",
-    "literature",
-    "ideas",
+    "territory",
+    "discovery",
+    "portfolio",
     "novelty_review",
     "planning",
     "implementation",
@@ -50,7 +55,10 @@ JOB_ACTIVE = {
     "interactive_running",
 }
 REQUIRED_COMPLETION_ARTIFACTS = (
+    "mission",
     "research_brief",
+    "discovery_report",
+    "candidate_portfolio",
     "idea_report",
     "novelty_audit",
     "novelty_review",
@@ -66,11 +74,26 @@ REQUIRED_COMPLETION_ARTIFACTS = (
     "citation_audit",
     "final_report",
 )
-NOVELTY_SCHEMA_VERSION = 1
+MISSION_SCHEMA_VERSION = 1
+PORTFOLIO_SCHEMA_VERSION = 1
+HUMAN_EVALUATION_SCHEMA_VERSION = 2
+NOVELTY_SCHEMA_VERSION = 2
 NOVELTY_MAX_AGE_DAYS = 30
 NOVELTY_REQUIRED_STAGES = {"pilot", "main", "ablation"}
 NOVELTY_PASS_DECISIONS = {"plausibly_novel"}
-NOVELTY_METHOD_CLAIMS = {"new_mechanism", "new_combination"}
+NOVELTY_PRIMARY_CLAIMS = {
+    "new_mechanism",
+    "new_combination",
+    "new_architecture",
+    "new_objective",
+    "new_representation",
+    "new_system",
+    "new_data_resource",
+    "new_evaluation_protocol",
+    "new_empirical_finding",
+    "new_theory",
+}
+NOVELTY_FALLBACK_CLAIMS = {"new_application", "reproduction", "diagnostic"}
 NOVELTY_DIAGNOSTIC_DECISIONS = {
     "plausibly_novel",
     "derivative",
@@ -86,11 +109,8 @@ NOVELTY_DECISIONS = {
     "rejected",
 }
 NOVELTY_CLAIM_CLASSES = {
-    "new_mechanism",
-    "new_combination",
-    "new_application",
-    "reproduction",
-    "diagnostic",
+    *NOVELTY_PRIMARY_CLAIMS,
+    *NOVELTY_FALLBACK_CLAIMS,
     "unresolved",
 }
 NOVELTY_SEARCH_CATEGORIES = {
@@ -102,6 +122,10 @@ NOVELTY_SEARCH_CATEGORIES = {
     "code",
     "backward_forward",
 }
+EXPLORATION_CANDIDATE_MINIMUM = {"broad": 3, "directed": 2, "fixed_problem": 1}
+MISSION_FALLBACK_POLICIES = {"return_to_discovery", "wait_human", "allow_diagnostic"}
+HUMAN_EVALUATION_POLICIES = {"pause_when_required", "existing_evidence_only", "forbid"}
+TARGET_OUTPUTS = {"paper"}
 SAFE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 SAFE_JOB_ID = re.compile(r"^[0-9]+(?:\.[A-Za-z0-9_.-]+)?$")
 AUTHORIZED_PROJECTS = {"wa66", "ey69", "po67", "iv96"}
@@ -204,6 +228,256 @@ def is_within(path: Path, parent: Path) -> bool:
 
 def canonical(path: str | Path, *, strict: bool = False) -> Path:
     return Path(path).expanduser().resolve(strict=strict)
+
+
+def sha256_json(payload: Any) -> str:
+    return hashlib.sha256(adapter_registry.canonical_json(payload)).hexdigest()
+
+
+def require_string_list(
+    payload: dict[str, Any],
+    key: str,
+    label: str,
+    *,
+    allow_empty: bool = True,
+) -> list[str]:
+    value = payload.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise CampaignError(f"{label}.{key} must be a list of non-empty strings")
+    if not allow_empty and not value:
+        raise CampaignError(f"{label}.{key} cannot be empty")
+    if len(set(value)) != len(value):
+        raise CampaignError(f"{label}.{key} contains duplicates")
+    return value
+
+
+def validate_mission(payload: Any, registry: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise CampaignError("mission must be a JSON object")
+    if payload.get("schema_version") != MISSION_SCHEMA_VERSION:
+        raise CampaignError(f"mission.schema_version must be {MISSION_SCHEMA_VERSION}")
+    objective = payload.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        raise CampaignError("mission.objective must be non-empty text")
+    exploration_mode = payload.get("exploration_mode")
+    if exploration_mode not in EXPLORATION_CANDIDATE_MINIMUM:
+        raise CampaignError(
+            "mission.exploration_mode must be one of "
+            + ", ".join(EXPLORATION_CANDIDATE_MINIMUM)
+        )
+    packs = require_string_list(payload, "domain_packs", "mission", allow_empty=False)
+    unknown_packs = sorted(set(packs) - set(registry["packs"]))
+    if unknown_packs:
+        raise CampaignError("mission references unknown domain packs: " + ", ".join(unknown_packs))
+    contributions = require_string_list(
+        payload, "acceptable_contributions", "mission", allow_empty=False
+    )
+    allowed_claims = NOVELTY_PRIMARY_CLAIMS | NOVELTY_FALLBACK_CLAIMS
+    unknown_claims = sorted(set(contributions) - allowed_claims)
+    if unknown_claims:
+        raise CampaignError("mission has unknown contribution classes: " + ", ".join(unknown_claims))
+    diagnostic_as_final = payload.get("diagnostic_as_final")
+    if not isinstance(diagnostic_as_final, bool):
+        raise CampaignError("mission.diagnostic_as_final must be boolean")
+    fallback_policy = payload.get("fallback_policy")
+    if fallback_policy not in MISSION_FALLBACK_POLICIES:
+        raise CampaignError(
+            "mission.fallback_policy must be one of " + ", ".join(sorted(MISSION_FALLBACK_POLICIES))
+        )
+    if diagnostic_as_final != (fallback_policy == "allow_diagnostic"):
+        raise CampaignError(
+            "mission.diagnostic_as_final must be true exactly when fallback_policy is allow_diagnostic"
+        )
+    fallback_claims = set(contributions) & NOVELTY_FALLBACK_CLAIMS
+    if diagnostic_as_final and not fallback_claims:
+        raise CampaignError("a diagnostic-final mission must accept at least one fallback contribution class")
+    if not diagnostic_as_final and fallback_claims:
+        raise CampaignError(
+            "mission cannot accept application, reproduction, or diagnostic claims when diagnostic_as_final is false"
+        )
+    human_policy = payload.get("human_evaluation_policy")
+    if human_policy not in HUMAN_EVALUATION_POLICIES:
+        raise CampaignError(
+            "mission.human_evaluation_policy must be one of "
+            + ", ".join(sorted(HUMAN_EVALUATION_POLICIES))
+        )
+    if payload.get("target_output") not in TARGET_OUTPUTS:
+        raise CampaignError("mission.target_output must be one of " + ", ".join(sorted(TARGET_OUTPUTS)))
+    selection = payload.get("adapter_selection")
+    if not isinstance(selection, dict):
+        raise CampaignError("mission.adapter_selection must be an object")
+    allowed_packs = {"core", *packs}
+    for kind in adapter_registry.ADAPTER_KINDS:
+        values = require_string_list(selection, kind, "mission.adapter_selection")
+        if "agent_select" in values and values != ["agent_select"]:
+            raise CampaignError(f"mission.adapter_selection.{kind} cannot mix agent_select with adapter ids")
+        for adapter_id in values:
+            if adapter_id == "agent_select":
+                continue
+            adapter = registry["adapters"].get(adapter_id)
+            if not adapter:
+                raise CampaignError(f"mission selects unknown adapter: {adapter_id}")
+            if adapter["kind"] != kind:
+                raise CampaignError(f"mission selects {adapter_id} under the wrong kind {kind}")
+            if adapter["pack_id"] not in allowed_packs:
+                raise CampaignError(f"mission selects {adapter_id} outside its domain packs")
+    return payload
+
+
+def default_mission(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.idea or not args.idea.strip():
+        raise CampaignError("--idea is required when --mission-file is omitted")
+    packs = args.domain_pack or ["core"]
+    contributions = args.acceptable_contribution or sorted(NOVELTY_PRIMARY_CLAIMS)
+    if args.allow_diagnostic_final:
+        contributions = list(dict.fromkeys([*contributions, "new_application", "reproduction", "diagnostic"]))
+    if packs == ["core"]:
+        selection = {
+            "task": ["core.open-task"],
+            "model": ["core.model-agnostic"],
+            "lever": ["core.evaluation-science"],
+            "evidence": ["core.controlled-evidence", "core.empirical-discovery"],
+            "constraint": [],
+        }
+    else:
+        selection = {
+            "task": ["agent_select"],
+            "model": ["agent_select"],
+            "lever": ["agent_select"],
+            "evidence": ["agent_select"],
+            "constraint": [],
+        }
+    return {
+        "schema_version": MISSION_SCHEMA_VERSION,
+        "objective": args.idea.strip(),
+        "exploration_mode": args.exploration_mode,
+        "domain_packs": packs,
+        "acceptable_contributions": contributions,
+        "diagnostic_as_final": bool(args.allow_diagnostic_final),
+        "fallback_policy": "allow_diagnostic" if args.allow_diagnostic_final else "return_to_discovery",
+        "human_evaluation_policy": args.human_evaluation_policy,
+        "target_output": args.target_output,
+        "adapter_selection": selection,
+    }
+
+
+def load_mission(args: argparse.Namespace, registry: dict[str, Any]) -> dict[str, Any]:
+    if args.mission_file:
+        path = canonical(args.mission_file, strict=True)
+        if not path.is_file():
+            raise CampaignError(f"mission file is not a regular file: {path}")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise CampaignError(f"invalid mission JSON: {exc}") from exc
+        if args.idea and args.idea.strip() and payload.get("objective") != args.idea.strip():
+            raise CampaignError("--idea and mission.objective differ; provide one authoritative objective")
+    else:
+        payload = default_mission(args)
+    return validate_mission(payload, registry)
+
+
+def route_binding(mission_sha256: str, registry_sha256: str, adapters: list[str]) -> dict[str, Any]:
+    return {
+        "mission_sha256": mission_sha256,
+        "registry_sha256": registry_sha256,
+        "adapters": sorted(adapters),
+    }
+
+
+def build_route(
+    mission: dict[str, Any],
+    mission_sha256: str,
+    registry: dict[str, Any],
+    adapter_ids: list[str],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    try:
+        bundle = adapter_registry.resolve_bundle(registry, mission["domain_packs"], adapter_ids)
+    except adapter_registry.AdapterError as exc:
+        raise CampaignError(str(exc)) from exc
+    for kind in adapter_registry.ADAPTER_KINDS:
+        fixed = {
+            adapter_id
+            for adapter_id in mission["adapter_selection"][kind]
+            if adapter_id != "agent_select"
+        }
+        missing = sorted(fixed - set(bundle["by_kind"][kind]))
+        if missing:
+            raise CampaignError(
+                f"adapter route omits mission-fixed {kind} adapters: {', '.join(missing)}"
+            )
+    human_policy = mission["human_evaluation_policy"]
+    if bundle["human_evaluation"] == "required" and human_policy == "forbid":
+        raise CampaignError("adapter route requires human evaluation but the mission forbids it")
+    binding = route_binding(mission_sha256, registry["sha256"], bundle["adapters"])
+    return {
+        "status": "resolved",
+        **bundle,
+        "mission_sha256": mission_sha256,
+        "sha256": sha256_json(binding),
+        "resolved_at": utc_now(),
+        "reason": reason,
+    }
+
+
+def validate_mission_binding(
+    state: dict[str, Any], registry: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    if registry is None:
+        try:
+            registry = adapter_registry.load_registry()
+        except adapter_registry.AdapterError as exc:
+            raise CampaignError(f"adapter registry is invalid: {exc}") from exc
+    mission_path = artifact_file(state, "mission")
+    mission_file = json_object(mission_path, "mission")
+    mission_state = state.get("mission")
+    mission_sha256 = state.get("mission_sha256")
+    if sha256_json(mission_file) != mission_sha256:
+        raise CampaignError("recorded mission content does not match campaign state")
+    if mission_state != mission_file or sha256_json(mission_state) != mission_sha256:
+        raise CampaignError("campaign mission state differs from immutable MISSION.json")
+    validate_mission(mission_state, registry)
+    return mission_state
+
+
+def validate_route(state: dict[str, Any], registry: dict[str, Any] | None = None) -> dict[str, Any]:
+    if registry is None:
+        try:
+            registry = adapter_registry.load_registry()
+        except adapter_registry.AdapterError as exc:
+            raise CampaignError(f"adapter registry is invalid: {exc}") from exc
+    mission_state = validate_mission_binding(state, registry)
+    mission_sha256 = state.get("mission_sha256")
+    route = state.get("route")
+    if not isinstance(route, dict) or route.get("status") != "resolved":
+        raise CampaignError("adapter route is unresolved; use route-set before entering portfolio")
+    if route.get("registry_sha256") != registry["sha256"]:
+        raise CampaignError("adapter registry changed after route resolution")
+    if route.get("mission_sha256") != mission_sha256:
+        raise CampaignError("adapter route is bound to a different mission")
+    expected = build_route(
+        mission_state,
+        mission_sha256,
+        registry,
+        list(route.get("adapters", [])),
+        reason=str(route.get("reason") or "validate existing route"),
+    )
+    if route.get("sha256") != expected["sha256"]:
+        raise CampaignError("adapter route hash is invalid")
+    for key in (
+        "packs",
+        "adapters",
+        "by_kind",
+        "human_evaluation",
+        "references",
+        "registry_sha256",
+        "mission_sha256",
+    ):
+        if route.get(key) != expected[key]:
+            raise CampaignError(f"adapter route field changed after resolution: {key}")
+    return route
 
 
 def validate_campaign_root(path: Path) -> None:
@@ -751,6 +1025,44 @@ def ensure_submission_budget(state: dict[str, Any], experiment: dict[str, Any]) 
 
 
 def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[str, Any]:
+    try:
+        registry = adapter_registry.load_registry()
+    except adapter_registry.AdapterError as exc:
+        raise CampaignError(f"adapter registry is invalid: {exc}") from exc
+    mission = load_mission(args, registry)
+    mission_sha256 = sha256_json(mission)
+    selection = mission["adapter_selection"]
+    explicit_selection = [
+        adapter_id
+        for kind in adapter_registry.ADAPTER_KINDS
+        for adapter_id in selection[kind]
+        if adapter_id != "agent_select"
+    ]
+    has_agent_selection = any(
+        "agent_select" in selection[kind] for kind in adapter_registry.ADAPTER_KINDS
+    )
+    if has_agent_selection:
+        route = {
+            "status": "unresolved",
+            "packs": list(dict.fromkeys(["core", *mission["domain_packs"]])),
+            "adapters": [],
+            "by_kind": {kind: [] for kind in adapter_registry.ADAPTER_KINDS},
+            "human_evaluation": "conditional",
+            "references": ["references/adapter-system.md"],
+            "registry_sha256": registry["sha256"],
+            "mission_sha256": mission_sha256,
+            "sha256": None,
+            "resolved_at": None,
+            "reason": "mission delegates route selection to discovery",
+        }
+    else:
+        route = build_route(
+            mission,
+            mission_sha256,
+            registry,
+            explicit_selection,
+            reason="route explicitly selected by the mission",
+        )
     deadline = parse_time(args.deadline)
     if deadline <= dt.datetime.now(dt.timezone.utc):
         raise CampaignError("deadline must be in the future")
@@ -791,7 +1103,16 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
     return {
         "schema_version": SCHEMA_VERSION,
         "campaign_id": args.campaign_id,
-        "idea": args.idea,
+        "idea": mission["objective"],
+        "mission": mission,
+        "mission_sha256": mission_sha256,
+        "adapter_registry": {
+            "schema_version": registry["schema_version"],
+            "sha256": registry["sha256"],
+            "packs": sorted(registry["packs"]),
+            "adapter_count": len(registry["adapters"]),
+        },
+        "route": route,
         "venue": args.venue,
         "assurance": args.assurance,
         "root": str(root),
@@ -862,6 +1183,17 @@ def cmd_init(args: argparse.Namespace) -> None:
         raise CampaignError(f"campaign root is not empty: {root}")
     root.mkdir(parents=True, exist_ok=True)
     state = build_state(args, root, workspace)
+    mission_path = root / "MISSION.json"
+    mission_path.write_text(json.dumps(state["mission"], indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state["artifacts"]["mission"] = {
+        "path": str(mission_path),
+        "recorded_at": state["created_at"],
+        "assurance": "deterministic",
+        "size_bytes": mission_path.stat().st_size,
+        "mtime_ns": mission_path.stat().st_mtime_ns,
+        "sha256": sha256_file(mission_path),
+        "content_sha256": state["mission_sha256"],
+    }
     atomic_write(root / "campaign.json", state)
     (root / "campaign.lock").touch(exist_ok=True)
     print(json.dumps({"created": str(root / "campaign.json"), "approval": state["approval"]}, indent=2))
@@ -871,6 +1203,7 @@ def cmd_approve(args: argparse.Namespace) -> None:
     with locked_state(args.root) as state:
         require_current_skill(state)
         pin_missing_skill_reference(state)
+        validate_mission_binding(state)
         require_author_control(state, "change campaign approval")
         if not args.by.strip():
             raise CampaignError("approver identity cannot be empty")
@@ -947,7 +1280,7 @@ def cmd_approve(args: argparse.Namespace) -> None:
         )
         state["status"] = "active"
         if not replacing:
-            state["phase"] = "literature"
+            state["phase"] = "territory"
         state["control"].update({"state": "needs_agent", "reason": "campaign approved", "wake_at": None})
         add_history(
             state,
@@ -1005,8 +1338,59 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
         if current.get("dirty") and os.environ.get("GADI_AUTORESEARCH_TESTING") != "1":
             raise CampaignError("cannot adopt a dirty gadi-autoresearch skill checkout")
         previous = state.get("skill_reference")
+        previous_registry = state.get("adapter_registry")
+        try:
+            registry = adapter_registry.load_registry()
+            validate_mission_binding(state, registry)
+        except adapter_registry.AdapterError as exc:
+            raise CampaignError(f"cannot adopt an invalid adapter registry: {exc}") from exc
         previous_control_reason = state["control"].get("reason")
         state["skill_reference"] = current
+        registry_changed = (previous_registry or {}).get("sha256") != registry["sha256"]
+        invalidated: list[str] = []
+        if registry_changed:
+            state["adapter_registry"] = {
+                "schema_version": registry["schema_version"],
+                "sha256": registry["sha256"],
+                "packs": sorted(registry["packs"]),
+                "adapter_count": len(registry["adapters"]),
+            }
+            state["route"] = {
+                "status": "unresolved",
+                "packs": list(dict.fromkeys(["core", *state["mission"]["domain_packs"]])),
+                "adapters": [],
+                "by_kind": {kind: [] for kind in adapter_registry.ADAPTER_KINDS},
+                "human_evaluation": "conditional",
+                "references": ["references/adapter-system.md"],
+                "registry_sha256": registry["sha256"],
+                "mission_sha256": state["mission_sha256"],
+                "sha256": None,
+                "resolved_at": None,
+                "reason": "adapter registry changed during explicit skill adoption",
+            }
+            for name in (
+                "candidate_portfolio",
+                "idea_report",
+                "novelty_audit",
+                "novelty_review",
+                "research_contract",
+                "experiment_plan",
+                "experiment_ledger",
+                "results",
+                "experiment_audit",
+                "claim_audit",
+                "narrative_report",
+                "paper_source",
+                "paper_pdf",
+                "citation_audit",
+                "final_report",
+                "human_evaluation",
+            ):
+                if state["artifacts"].pop(name, None) is not None:
+                    invalidated.append(name)
+            state.pop("research_track", None)
+            if state["phase"] not in {"intake", "territory", "discovery"}:
+                state["phase"] = "discovery"
         state["control"].setdefault("novelty_review_thread_id", None)
         state["control"].setdefault("novelty_review_requested_at", None)
         if state["status"] == "active" and state["control"]["state"] == "waiting_human":
@@ -1021,6 +1405,10 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
             previous=previous,
             current=current,
             previous_control_reason=previous_control_reason,
+            registry_changed=registry_changed,
+            previous_registry=previous_registry,
+            current_registry=state.get("adapter_registry"),
+            invalidated_artifacts=invalidated,
         )
         print(json.dumps({"previous": previous, "current": current}, indent=2))
 
@@ -1031,6 +1419,10 @@ def cmd_status(args: argparse.Namespace) -> None:
     output = {
         "campaign_id": state["campaign_id"],
         "idea": state["idea"],
+        "mission": state.get("mission"),
+        "mission_sha256": state.get("mission_sha256"),
+        "adapter_registry": state.get("adapter_registry"),
+        "route": state.get("route"),
         "status": state["status"],
         "phase": state["phase"],
         "workflow_reference": state.get("workflow_reference"),
@@ -1065,6 +1457,86 @@ def cmd_preflight(args: argparse.Namespace) -> None:
     require_approved(state, require_active=False, allow_expired=True)
     report = live_preflight(state)
     print(json.dumps(report, indent=2))
+
+
+def cmd_route_set(args: argparse.Namespace) -> None:
+    adapter_ids = [item.strip() for item in args.adapters.split(",") if item.strip()]
+    if not adapter_ids or len(set(adapter_ids)) != len(adapter_ids):
+        raise CampaignError("--adapters must be a non-empty comma-separated list without duplicates")
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        pin_missing_skill_reference(state)
+        require_author_control(state, "resolve the adapter route")
+        if state["phase"] not in {"territory", "discovery"}:
+            raise CampaignError("adapter routes may be selected only in territory or discovery")
+        active = [
+            experiment_id
+            for experiment_id, experiment in state["experiments"].items()
+            if experiment_status(experiment) in JOB_ACTIVE
+        ]
+        if active:
+            raise CampaignError("cannot change the adapter route while jobs are active: " + ", ".join(active))
+        claim_experiments = [
+            experiment_id
+            for experiment_id, experiment in state["experiments"].items()
+            if experiment.get("mode") != "external"
+            and experiment.get("stage") not in {"discovery", "sanity", "profile"}
+        ]
+        if claim_experiments:
+            raise CampaignError(
+                "cannot change the adapter route after claim-bearing experiments are registered: "
+                + ", ".join(claim_experiments)
+            )
+        try:
+            registry = adapter_registry.load_registry()
+        except adapter_registry.AdapterError as exc:
+            raise CampaignError(f"adapter registry is invalid: {exc}") from exc
+        if state.get("adapter_registry", {}).get("sha256") != registry["sha256"]:
+            raise CampaignError("adapter registry differs from the campaign-pinned registry")
+        validate_mission_binding(state, registry)
+        route = build_route(
+            state["mission"],
+            state["mission_sha256"],
+            registry,
+            adapter_ids,
+            reason=args.reason,
+        )
+        previous = state.get("route")
+        state["route"] = route
+        invalidated = []
+        for name in (
+            "candidate_portfolio",
+            "idea_report",
+            "novelty_audit",
+            "novelty_review",
+            "research_contract",
+            "experiment_plan",
+            "experiment_ledger",
+            "results",
+            "experiment_audit",
+            "claim_audit",
+            "narrative_report",
+            "paper_source",
+            "paper_pdf",
+            "citation_audit",
+            "final_report",
+            "human_evaluation",
+        ):
+            if state["artifacts"].pop(name, None) is not None:
+                invalidated.append(name)
+        state.pop("research_track", None)
+        state["control"].update({"novelty_review_thread_id": None, "novelty_review_requested_at": None})
+        add_history(
+            state,
+            "adapter_route_resolved",
+            previous_sha256=(previous or {}).get("sha256"),
+            current_sha256=route["sha256"],
+            adapters=route["adapters"],
+            invalidated_artifacts=invalidated,
+            reason=args.reason,
+        )
+        print(json.dumps(route, indent=2))
 
 
 def artifact_file(state: dict[str, Any], name: str) -> Path:
@@ -1104,6 +1576,110 @@ def require_nonempty_list(payload: dict[str, Any], key: str, label: str) -> list
     if not isinstance(value, list) or not value:
         raise CampaignError(f"{label}.{key} must be a non-empty list")
     return value
+
+
+def validate_candidate_portfolio(state: dict[str, Any], path: Path) -> dict[str, Any]:
+    portfolio = json_object(path, "candidate portfolio")
+    if portfolio.get("schema_version") != PORTFOLIO_SCHEMA_VERSION:
+        raise CampaignError("unsupported candidate portfolio schema")
+    route = validate_route(state)
+    if require_text(portfolio, "mission_sha256", "candidate_portfolio") != state["mission_sha256"]:
+        raise CampaignError("candidate portfolio is not bound to the current mission")
+    if require_text(portfolio, "route_sha256", "candidate_portfolio") != route["sha256"]:
+        raise CampaignError("candidate portfolio is not bound to the current adapter route")
+    parse_time(require_text(portfolio, "created_at", "candidate_portfolio"))
+    active_id = require_text(portfolio, "active_candidate_id", "candidate_portfolio")
+    candidates = require_nonempty_list(portfolio, "candidates", "candidate_portfolio")
+    if len(candidates) > 8:
+        raise CampaignError("candidate portfolio may contain at most eight candidates")
+    seen: set[str] = set()
+    active: list[str] = []
+    viable = 0
+    for index, candidate in enumerate(candidates):
+        label = f"candidate_portfolio.candidates[{index}]"
+        if not isinstance(candidate, dict):
+            raise CampaignError(f"{label} must be an object")
+        candidate_id = require_text(candidate, "id", label)
+        if not SAFE_ID.fullmatch(candidate_id):
+            raise CampaignError(f"{label}.id is unsafe: {candidate_id}")
+        if candidate_id in seen:
+            raise CampaignError(f"duplicate candidate id: {candidate_id}")
+        seen.add(candidate_id)
+        status = require_text(candidate, "status", label)
+        if status not in {"active", "backup", "eliminated"}:
+            raise CampaignError(f"{label}.status must be active, backup, or eliminated")
+        if status == "active":
+            active.append(candidate_id)
+        if status in {"active", "backup"}:
+            viable += 1
+        for key in (
+            "observation",
+            "causal_hypothesis",
+            "mechanism",
+            "predicted_signature",
+            "falsifier",
+            "cheap_test",
+            "nearest_work_delta",
+        ):
+            require_text(candidate, key, label)
+        cost = candidate.get("estimated_cost")
+        if not isinstance(cost, dict):
+            raise CampaignError(f"{label}.estimated_cost must be an object")
+        for key in ("su", "jobs", "persistent_entries"):
+            value = cost.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                raise CampaignError(f"{label}.estimated_cost.{key} must be non-negative")
+    if active != [active_id]:
+        raise CampaignError("candidate portfolio must contain exactly one active candidate matching active_candidate_id")
+    minimum = EXPLORATION_CANDIDATE_MINIMUM[state["mission"]["exploration_mode"]]
+    if viable < minimum:
+        raise CampaignError(
+            f"{state['mission']['exploration_mode']} exploration requires at least {minimum} viable candidates"
+        )
+    return portfolio
+
+
+def validate_human_evaluation(state: dict[str, Any], path: Path) -> dict[str, Any]:
+    evidence = json_object(path, "human evaluation")
+    if evidence.get("schema_version") != HUMAN_EVALUATION_SCHEMA_VERSION:
+        raise CampaignError("unsupported human evaluation schema")
+    if evidence.get("status") != "complete":
+        raise CampaignError("human evaluation status must be complete")
+    route = validate_route(state)
+    if require_text(evidence, "mission_sha256", "human_evaluation") != state["mission_sha256"]:
+        raise CampaignError("human evaluation is not bound to the current mission")
+    if require_text(evidence, "route_sha256", "human_evaluation") != route["sha256"]:
+        raise CampaignError("human evaluation is not bound to the current adapter route")
+    portfolio = validate_candidate_portfolio(
+        state, artifact_file(state, "candidate_portfolio")
+    )
+    if require_text(evidence, "candidate_id", "human_evaluation") != portfolio["active_candidate_id"]:
+        raise CampaignError("human evaluation is not bound to the active candidate")
+    audit_path = artifact_file(state, "novelty_audit")
+    validate_novelty_audit(state, audit_path)
+    if require_text(evidence, "novelty_audit_sha256", "human_evaluation") != sha256_file(audit_path):
+        raise CampaignError("human evaluation is not bound to the current novelty audit")
+    evidence_sha256 = require_text(evidence, "evidence_sha256", "human_evaluation")
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
+        raise CampaignError("human_evaluation.evidence_sha256 must be a lowercase SHA-256 digest")
+    protocol = require_text(evidence, "protocol", "human_evaluation")
+    if protocol not in {"new_study", "existing_benchmark"}:
+        raise CampaignError("human_evaluation.protocol must be new_study or existing_benchmark")
+    require_text(evidence, "source", "human_evaluation")
+    require_text(evidence, "population", "human_evaluation")
+    if evidence.get("blinded") is not True:
+        raise CampaignError("human evaluation must document blinded=true")
+    for key in ("rater_count", "judgment_count"):
+        value = evidence.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise CampaignError(f"human_evaluation.{key} must be a positive integer")
+    metrics = evidence.get("metrics")
+    if not isinstance(metrics, dict) or not metrics:
+        raise CampaignError("human_evaluation.metrics must be a non-empty object")
+    limitations = evidence.get("limitations")
+    if not isinstance(limitations, list):
+        raise CampaignError("human_evaluation.limitations must be a list")
+    return evidence
 
 
 def validate_search_matrix(searches: Any, label: str) -> None:
@@ -1165,6 +1741,8 @@ def validate_novelty_audit(state: dict[str, Any], path: Path) -> dict[str, Any]:
         raise CampaignError(f"unsupported novelty claim class: {claim_class}")
     if verdict not in NOVELTY_DECISIONS:
         raise CampaignError(f"unsupported novelty audit verdict: {verdict}")
+    if claim_class != "unresolved" and claim_class not in state["mission"]["acceptable_contributions"]:
+        raise CampaignError(f"novelty audit claim class {claim_class} is outside the mission")
     recent_timestamp(audit.get("searched_at"), "novelty_audit.searched_at")
     require_text(audit, "strongest_rejection", "novelty_audit")
     require_text(audit, "author_rebuttal", "novelty_audit")
@@ -1172,6 +1750,17 @@ def validate_novelty_audit(state: dict[str, Any], path: Path) -> dict[str, Any]:
     idea_report = artifact_file(state, "idea_report")
     if require_text(audit, "idea_report_sha256", "novelty_audit") != sha256_file(idea_report):
         raise CampaignError("novelty audit is not bound to the recorded idea report")
+    if require_text(audit, "mission_sha256", "novelty_audit") != state["mission_sha256"]:
+        raise CampaignError("novelty audit is not bound to the current mission")
+    route = validate_route(state)
+    if require_text(audit, "route_sha256", "novelty_audit") != route["sha256"]:
+        raise CampaignError("novelty audit is not bound to the current adapter route")
+    portfolio_path = artifact_file(state, "candidate_portfolio")
+    portfolio = validate_candidate_portfolio(state, portfolio_path)
+    if require_text(audit, "candidate_portfolio_sha256", "novelty_audit") != sha256_file(portfolio_path):
+        raise CampaignError("novelty audit is not bound to the recorded candidate portfolio")
+    if candidate_id != portfolio["active_candidate_id"]:
+        raise CampaignError("novelty audit candidate is not the active portfolio candidate")
 
     primitives = require_nonempty_list(audit, "primitives", "novelty_audit")
     primitive_ids: set[str] = set()
@@ -1284,7 +1873,7 @@ def validate_novelty_review(state: dict[str, Any], path: Path) -> dict[str, Any]
     return review
 
 
-def novelty_resolution(state: dict[str, Any], *, require_method: bool = False) -> str:
+def novelty_resolution(state: dict[str, Any], *, require_primary: bool = False) -> str:
     audit_path = artifact_file(state, "novelty_audit")
     audit = validate_novelty_audit(state, audit_path)
     review_path = artifact_file(state, "novelty_review")
@@ -1309,28 +1898,68 @@ def novelty_resolution(state: dict[str, Any], *, require_method: bool = False) -
         raise CampaignError("novelty audit and review candidate ids differ")
     if review["blocking_overlaps"] or review["required_changes"]:
         raise CampaignError("novelty review has unresolved blocking overlaps or required changes")
-    if review["decision"] in NOVELTY_PASS_DECISIONS and review["claim_class"] in NOVELTY_METHOD_CLAIMS:
-        return "method"
-    if review["decision"] in NOVELTY_DIAGNOSTIC_DECISIONS and review["claim_class"] in {
-        "new_application",
-        "reproduction",
-        "diagnostic",
-    }:
-        if require_method:
-            raise CampaignError("novelty review permits only an application, reproduction, or diagnostic track")
-        return "diagnostic"
+    claim_class = review["claim_class"]
+    acceptable = set(state["mission"]["acceptable_contributions"])
+    if review["decision"] in NOVELTY_PASS_DECISIONS and claim_class in NOVELTY_PRIMARY_CLAIMS:
+        if claim_class not in acceptable:
+            raise CampaignError(
+                f"novelty review permits {claim_class}, but the mission does not accept that contribution"
+            )
+        return claim_class
+    if review["decision"] in NOVELTY_DIAGNOSTIC_DECISIONS and claim_class in NOVELTY_FALLBACK_CLAIMS:
+        if (
+            require_primary
+            or not state["mission"]["diagnostic_as_final"]
+            or state["mission"]["fallback_policy"] != "allow_diagnostic"
+            or claim_class not in acceptable
+        ):
+            raise CampaignError(
+                "novelty review permits only an application, reproduction, or diagnostic result; "
+                "the mission requires returning to discovery"
+            )
+        return claim_class
     raise CampaignError(
-        "novelty review is unresolved or rejects the current claim; return to ideas and audit a revised candidate"
+        "novelty review is unresolved or rejects the current claim; return to discovery or portfolio"
     )
 
 
 def require_experiment_novelty(state: dict[str, Any], stage: str) -> None:
-    if stage in {"sanity", "profile"}:
+    if stage in {"sanity", "profile", "discovery"}:
         return
     if stage in NOVELTY_REQUIRED_STAGES:
-        novelty_resolution(state, require_method=True)
+        novelty_resolution(state, require_primary=True)
         return
     novelty_resolution(state)
+
+
+def current_claim_binding(state: dict[str, Any]) -> dict[str, str]:
+    route = validate_route(state)
+    portfolio_path = artifact_file(state, "candidate_portfolio")
+    portfolio = validate_candidate_portfolio(state, portfolio_path)
+    idea_path = artifact_file(state, "idea_report")
+    audit_path = artifact_file(state, "novelty_audit")
+    validate_novelty_audit(state, audit_path)
+    review_path = artifact_file(state, "novelty_review")
+    claim_class = novelty_resolution(state)
+    return {
+        "mission_sha256": state["mission_sha256"],
+        "route_sha256": route["sha256"],
+        "candidate_portfolio_sha256": sha256_file(portfolio_path),
+        "active_candidate_id": portfolio["active_candidate_id"],
+        "idea_report_sha256": sha256_file(idea_path),
+        "novelty_audit_sha256": sha256_file(audit_path),
+        "novelty_review_sha256": sha256_file(review_path),
+        "claim_class": claim_class,
+    }
+
+
+def require_experiment_claim_binding(state: dict[str, Any], experiment: dict[str, Any]) -> None:
+    if experiment["stage"] in {"sanity", "profile", "discovery"}:
+        return
+    if experiment.get("claim_binding") != current_claim_binding(state):
+        raise CampaignError(
+            "experiment is bound to a different candidate or novelty lineage; register a new experiment"
+        )
 
 
 def require_author_control(state: dict[str, Any], action: str) -> None:
@@ -1340,13 +1969,19 @@ def require_author_control(state: dict[str, Any], action: str) -> None:
 
 def require_phase_entry(state: dict[str, Any], phase: str) -> None:
     required = {
-        "ideas": ("research_brief", "literature"),
-        "novelty_review": ("idea_report", "novelty_audit"),
+        "territory": ("mission",),
+        "discovery": ("research_brief", "literature"),
+        "portfolio": ("discovery_report",),
+        "novelty_review": ("candidate_portfolio", "idea_report", "novelty_audit"),
         "implementation": ("research_contract", "experiment_plan", "experiment_ledger"),
         "experiments": ("sanity",),
     }
     for name in required.get(phase, ()):
         artifact_file(state, name)
+    if phase == "portfolio":
+        validate_route(state)
+    if phase == "novelty_review":
+        validate_candidate_portfolio(state, artifact_file(state, "candidate_portfolio"))
     if PHASES.index(phase) >= PHASES.index("planning"):
         state["research_track"] = novelty_resolution(state)
 
@@ -1362,6 +1997,8 @@ def cmd_phase(args: argparse.Namespace) -> None:
             raise CampaignError("completed campaign phases cannot be changed")
         if args.phase == "complete":
             raise CampaignError("use handoff --state complete so the completion audit runs")
+        if previous not in PHASES:
+            raise CampaignError(f"campaign records unsupported phase {previous!r}; migrate or recreate it")
         previous_index = PHASES.index(previous)
         target_index = PHASES.index(args.phase)
         if target_index == previous_index:
@@ -1370,6 +2007,8 @@ def cmd_phase(args: argparse.Namespace) -> None:
             raise CampaignError("forward phase transitions must advance exactly one phase")
         require_phase_entry(state, args.phase)
         state["phase"] = args.phase
+        if target_index < PHASES.index("planning"):
+            state.pop("research_track", None)
         add_history(state, "phase_changed", previous=previous, current=args.phase, reason=args.reason)
         print(f"{previous} -> {args.phase}")
 
@@ -1395,9 +2034,11 @@ def cmd_artifact(args: argparse.Namespace) -> None:
         require_current_skill(state)
         pin_missing_skill_reference(state)
         validate_artifact_path(state, path)
+        if args.name == "mission":
+            raise CampaignError("the mission is immutable after initialization; create a new campaign to change it")
         if state["control"]["state"] == "novelty_reviewer_running" and args.name != "novelty_review":
             raise CampaignError("the cold novelty reviewer may record only novelty_review")
-        if args.name in {"idea_report", "novelty_audit", "novelty_review"}:
+        if args.name in {"candidate_portfolio", "idea_report", "novelty_audit", "novelty_review"}:
             active_claim_jobs = [
                 experiment_id
                 for experiment_id, experiment in state["experiments"].items()
@@ -1435,16 +2076,51 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             missing = sorted(required - set(sanity)) if isinstance(sanity, dict) else sorted(required)
             if missing or sanity.get("status") != "pass":
                 raise CampaignError("sanity JSON is not a passing witness; missing/invalid: " + ", ".join(missing or ["status"]))
+        if args.name == "candidate_portfolio":
+            if path.suffix != ".json" or args.assurance != "provisional":
+                raise CampaignError("candidate_portfolio must be a provisional JSON artifact")
+            validate_candidate_portfolio(state, path)
+            previous_portfolio = state["artifacts"].get("candidate_portfolio")
+            invalidates_idea = bool(
+                previous_portfolio and previous_portfolio.get("sha256") != sha256_file(path)
+            )
+            downstream = [
+                "novelty_audit",
+                "novelty_review",
+                "research_contract",
+                "experiment_plan",
+                "human_evaluation",
+            ]
+            if invalidates_idea:
+                downstream.insert(0, "idea_report")
+            for name in downstream:
+                state["artifacts"].pop(name, None)
         if args.name == "novelty_audit":
             if path.suffix != ".json" or args.assurance != "provisional":
                 raise CampaignError("novelty_audit must be a provisional JSON artifact")
             validate_novelty_audit(state, path)
+            previous_audit = state["artifacts"].get("novelty_audit")
+            if previous_audit and previous_audit.get("sha256") != sha256_file(path):
+                state["artifacts"].pop("human_evaluation", None)
         if args.name == "novelty_review":
             if path.suffix != ".json" or args.assurance != "provisional":
                 raise CampaignError("controller-launched same-family novelty_review must be provisional JSON")
             if state["control"]["state"] != "novelty_reviewer_running":
                 raise CampaignError("novelty_review may be recorded only by the controller's fresh reviewer")
             validate_novelty_review(state, path)
+        if args.name == "human_evaluation":
+            if path.suffix != ".json" or args.assurance != "accepted":
+                raise CampaignError("human_evaluation must be an accepted JSON artifact")
+            if state["control"]["state"] != "waiting_human":
+                raise CampaignError(
+                    "human_evaluation may be accepted only while the campaign is waiting_human"
+                )
+            human_evidence = validate_human_evaluation(state, path)
+            policy = state["mission"]["human_evaluation_policy"]
+            if policy == "forbid":
+                raise CampaignError("the mission forbids human evaluation")
+            if policy == "existing_evidence_only" and human_evidence["protocol"] != "existing_benchmark":
+                raise CampaignError("the mission permits only an existing human-evidence benchmark")
         state["artifacts"][args.name] = {
             "path": str(path),
             "recorded_at": utc_now(),
@@ -1493,6 +2169,11 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         pin_missing_skill_reference(state)
         require_author_control(state, "register experiments")
         require_experiment_novelty(state, args.stage)
+        claim_binding = (
+            None
+            if args.stage in {"sanity", "profile", "discovery"}
+            else current_claim_binding(state)
+        )
         if args.id in state["experiments"]:
             raise CampaignError(f"experiment already exists: {args.id}")
         image_value = args.image or state["storage"].get("environment")
@@ -1542,6 +2223,7 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             "result_dir": str(result_dir),
             "success_file": str(success_path),
             "depends_on": args.depends_on,
+            "claim_binding": claim_binding,
             "attempts": [],
         }
         current_budget = budget_summary(state)
@@ -1649,6 +2331,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
     if experiment["mode"] != "batch":
         raise CampaignError("use the interactive command for interactive experiments")
     require_experiment_novelty(state, experiment["stage"])
+    require_experiment_claim_binding(state, experiment)
     if experiment_status(experiment) not in {"planned", "failed", "failed_submission", "cancelled"}:
         raise CampaignError(f"experiment cannot be submitted from status {experiment_status(experiment)}")
     require_dependencies(state, experiment)
@@ -1697,6 +2380,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         if current_status not in {"planned", "failed", "failed_submission", "cancelled"}:
             raise CampaignError(f"experiment cannot be submitted from current status {current_status}")
         require_experiment_novelty(current, current_exp["stage"])
+        require_experiment_claim_binding(current, current_exp)
         require_dependencies(current, current_exp)
         require_registered_inputs(current, current_exp)
         validate_resources(current_exp["resources"], current["approval"], "batch")
@@ -1912,6 +2596,7 @@ def cmd_interactive(args: argparse.Namespace) -> None:
     if not experiment or experiment["mode"] != "interactive":
         raise CampaignError(f"unknown interactive experiment: {args.id}")
     require_experiment_novelty(state, experiment["stage"])
+    require_experiment_claim_binding(state, experiment)
     if experiment_status(experiment) not in {"planned", "failed", "failed_submission", "cancelled"}:
         raise CampaignError(f"interactive experiment cannot start from {experiment_status(experiment)}")
     require_dependencies(state, experiment)
@@ -1965,6 +2650,7 @@ def cmd_interactive(args: argparse.Namespace) -> None:
         if current_status not in {"planned", "failed", "failed_submission", "cancelled"}:
             raise CampaignError(f"interactive experiment cannot start from current status {current_status}")
         require_experiment_novelty(current, current_exp["stage"])
+        require_experiment_claim_binding(current, current_exp)
         require_dependencies(current, current_exp)
         require_registered_inputs(current, current_exp)
         validate_resources(current_exp["resources"], current["approval"], "interactive")
@@ -2607,15 +3293,32 @@ def cmd_worker_run(args: argparse.Namespace) -> None:
     raise SystemExit(exit_status)
 
 
+def required_completion_artifacts(state: dict[str, Any]) -> tuple[str, ...]:
+    required = list(REQUIRED_COMPLETION_ARTIFACTS)
+    route = validate_route(state)
+    if route["human_evaluation"] == "required":
+        required.append("human_evaluation")
+    return tuple(required)
+
+
 def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
-    missing = [name for name in REQUIRED_COMPLETION_ARTIFACTS if name not in state["artifacts"]]
+    required = required_completion_artifacts(state)
+    missing = [name for name in required if name not in state["artifacts"]]
     if missing:
         raise CampaignError("cannot complete campaign; missing artifacts: " + ", ".join(missing))
     state["research_track"] = novelty_resolution(state)
+    mission_path = artifact_file(state, "mission")
+    if sha256_json(json_object(mission_path, "mission")) != state["mission_sha256"]:
+        raise CampaignError("recorded mission content does not match campaign state")
+    validate_candidate_portfolio(state, artifact_file(state, "candidate_portfolio"))
+    if "human_evaluation" in required:
+        if state["artifacts"]["human_evaluation"]["assurance"] != "accepted":
+            raise CampaignError("required human evaluation must have accepted assurance")
+        validate_human_evaluation(state, artifact_file(state, "human_evaluation"))
     summary = budget_summary(state)
     if summary["actual_persistent_entries"] > summary["max_persistent_files"]:
         raise CampaignError("cannot complete campaign after exceeding the persistent-file envelope")
-    for name in REQUIRED_COMPLETION_ARTIFACTS:
+    for name in required:
         record = state["artifacts"][name]
         path = canonical(record["path"])
         if not path.is_file():
@@ -2642,7 +3345,7 @@ def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
         signature = handle.read(5)
     if paper_pdf.stat().st_size < 100 or signature != b"%PDF-":
         raise CampaignError("paper_pdf is not a nontrivial PDF file")
-    assurances = {state["artifacts"][name]["assurance"] for name in REQUIRED_COMPLETION_ARTIFACTS}
+    assurances = {state["artifacts"][name]["assurance"] for name in required}
     return ("provisional" if "provisional" in assurances else "accepted", workspace_git["commit"])
 
 
@@ -2721,7 +3424,23 @@ def cmd_resume(args: argparse.Namespace) -> None:
 def add_common_init(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("root")
     parser.add_argument("--campaign-id", required=True)
-    parser.add_argument("--idea", required=True)
+    parser.add_argument("--idea")
+    parser.add_argument("--mission-file")
+    parser.add_argument("--domain-pack", action="append", default=[])
+    parser.add_argument(
+        "--acceptable-contribution",
+        action="append",
+        choices=sorted(NOVELTY_PRIMARY_CLAIMS | NOVELTY_FALLBACK_CLAIMS),
+        default=[],
+    )
+    parser.add_argument("--allow-diagnostic-final", action="store_true")
+    parser.add_argument("--exploration-mode", choices=tuple(EXPLORATION_CANDIDATE_MINIMUM), default="broad")
+    parser.add_argument(
+        "--human-evaluation-policy",
+        choices=sorted(HUMAN_EVALUATION_POLICIES),
+        default="pause_when_required",
+    )
+    parser.add_argument("--target-output", choices=sorted(TARGET_OUTPUTS), default="paper")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--venue", default="generic-preprint")
     parser.add_argument("--assurance", choices=("draft", "submission"), default="draft")
@@ -2788,6 +3507,12 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("root")
     preflight.set_defaults(func=cmd_preflight)
 
+    route = sub.add_parser("route-set", help="validate and record a composable research-adapter route")
+    route.add_argument("root")
+    route.add_argument("--adapters", required=True)
+    route.add_argument("--reason", required=True)
+    route.set_defaults(func=cmd_route_set)
+
     phase = sub.add_parser("phase", help="record a research phase transition and reason")
     phase.add_argument("root")
     phase.add_argument("phase", choices=PHASES)
@@ -2804,7 +3529,7 @@ def build_parser() -> argparse.ArgumentParser:
     experiment = sub.add_parser("experiment-add", help="register a structured interactive or batch experiment")
     experiment.add_argument("root")
     experiment.add_argument("--id", required=True)
-    experiment.add_argument("--stage", choices=("sanity", "profile", "pilot", "baseline", "main", "ablation", "audit", "paper"), required=True)
+    experiment.add_argument("--stage", choices=("discovery", "sanity", "profile", "pilot", "baseline", "main", "ablation", "audit", "paper"), required=True)
     experiment.add_argument("--mode", choices=("interactive", "batch"), required=True)
     experiment.add_argument("--queue", required=True)
     experiment.add_argument("--project", required=True)

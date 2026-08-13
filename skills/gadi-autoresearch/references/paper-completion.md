@@ -29,13 +29,14 @@ Clone only into the campaign workspace or another user-approved path under `/g/d
 
 Before final completion:
 
-1. **Novelty refresh**: bound audit/review are no more than 30 days old, still match the idea, and the paper uses the permitted method or diagnostic claim class.
+1. **Mission and novelty refresh**: mission, adapter route, portfolio, idea, audit, and review hashes agree; searches are no more than 30 days old; the paper uses a mission-permitted claim class.
 2. **Experiment integrity**: real ground truth/proxy labels, no leakage, no phantom files, no selective normalization, honest scope.
 3. **Result-to-claim**: every headline and abstract claim has raw evidence and respects its claim ceiling.
 4. **Paper claim audit**: every number, comparison, dataset size, seed count, and tolerance agrees with canonical machine-readable results.
 5. **Citation audit**: every cited work exists, metadata is correct, and the cited passage actually supports the surrounding statement.
 6. **Compilation check**: clean LaTeX build succeeds, references resolve, figures exist, and the final PDF is nonempty/readable.
-7. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, and unresolved risks appear in the paper.
+7. **Human-evidence check**: every perceptual or preference claim has accepted real evidence when the route requires it; no ratings or participant records were invented.
+8. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, population limits, and unresolved risks appear in the paper.
 
 Semantic audits performed only by fresh Codex reviewers remain `provisional`. Deterministic compilation, schema, metric-trace, and file checks may be recorded as `deterministic`. Do not upgrade provisional science to submission-ready wording.
 
@@ -45,7 +46,10 @@ Record these canonical names with `campaign.py artifact`:
 
 | Name | Typical path |
 |---|---|
+| `mission` | `MISSION.json` |
 | `research_brief` | `RESEARCH_BRIEF.md` |
+| `discovery_report` | `DISCOVERY_REPORT.md` |
+| `candidate_portfolio` | `CANDIDATE_PORTFOLIO.json` |
 | `idea_report` | `IDEA_REPORT.md` |
 | `novelty_audit` | `NOVELTY_AUDIT.json` |
 | `novelty_review` | `NOVELTY_REVIEW.json` |
@@ -61,16 +65,22 @@ Record these canonical names with `campaign.py artifact`:
 | `citation_audit` | `paper/CITATION_AUDIT.md` or JSON |
 | `final_report` | `FINAL_REPORT.md` |
 
+When the selected adapter route has `human_evaluation: required`, also record
+`human_evaluation` as accepted JSON. The completion gate validates its real source, population,
+blinding, positive rater/judgment counts, metrics, limitations, packed-evidence digest, and binding
+to the current mission, route, active candidate, and novelty audit.
+
 `FINAL_REPORT.md` must state:
 
-- broad direction and final research question
-- selected idea and important pivots
+- immutable mission, final adapter route, and research question
+- discovered opportunity, selected candidate, rejected candidates, and important pivots
 - novelty decision, claim class, closest prior work, and reviewer thread provenance
 - exact Git commit, `.sqsh`, data versions, projects, jobs, GPU/SU estimates, and file-count delta
 - primary results with uncertainty and baseline comparison
 - negative results and remaining limitations
 - paper source and PDF paths
 - audit provenance and `overall_assurance`
+- human-evidence provenance and population limits when applicable
 - whether the work is a draft, provisional submission candidate, or accepted-assurance candidate
 
 Commit the final paper source and evidence-generation code, leave the workspace clean, and record artifacts only after their final content is stable. `paper_source` must be a tracked `.tex` file; the completion gate records the final Git commit. Only after inspecting every recorded path and confirming no active jobs remain may the agent run:

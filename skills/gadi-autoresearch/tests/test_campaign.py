@@ -108,8 +108,14 @@ class CampaignTests(unittest.TestCase):
             result = CAMPAIGN.main(list(args))
         return result, stdout.getvalue(), stderr.getvalue()
 
-    def init(self, *, max_files: int = 64, max_su: int = 500) -> None:
-        code, _, error = self.call(
+    def init(
+        self,
+        *,
+        max_files: int = 64,
+        max_su: int = 500,
+        allow_diagnostic_final: bool = False,
+    ) -> None:
+        arguments = [
             "init",
             str(self.root),
             "--campaign-id",
@@ -130,7 +136,10 @@ class CampaignTests(unittest.TestCase):
             str(self.image),
             "--data",
             str(self.data),
-        )
+        ]
+        if allow_diagnostic_final:
+            arguments.append("--allow-diagnostic-final")
+        code, _, error = self.call(*arguments)
         self.assertEqual(code, 0, error)
 
     def approve(self, *, allow_cancel: bool = False, allow_storage: bool = False) -> None:
@@ -148,6 +157,31 @@ class CampaignTests(unittest.TestCase):
         if allow_storage:
             arguments.append("--allow-storage-publish")
         code, _, error = self.call(*arguments)
+        self.assertEqual(code, 0, error)
+
+    def init_audio(self, *, human_policy: str = "pause_when_required") -> None:
+        code, _, error = self.call(
+            "init",
+            str(self.root),
+            "--campaign-id",
+            "audio-campaign",
+            "--idea",
+            "discover a publishable contribution across audio AI",
+            "--domain-pack",
+            "audio",
+            "--human-evaluation-policy",
+            human_policy,
+            "--workspace",
+            str(self.workspace),
+            "--projects",
+            "wa66,ey69",
+            "--deadline",
+            "2099-01-01T00:00:00Z",
+            "--environment",
+            str(self.image),
+            "--data",
+            str(self.data),
+        )
         self.assertEqual(code, 0, error)
 
     def add_batch(
@@ -245,12 +279,56 @@ class CampaignTests(unittest.TestCase):
         self.record_artifact("idea_report", path, "provisional")
         return path
 
+    def write_candidate_portfolio(self, *, candidate_id: str = "adaptive-replay") -> Path:
+        state = CAMPAIGN.load_state(self.root)
+        existing = state["artifacts"].get("candidate_portfolio")
+        if existing:
+            return Path(existing["path"])
+        candidates = []
+        for index, (item_id, status) in enumerate(
+            ((candidate_id, "active"), ("backup-one", "backup"), ("backup-two", "backup"))
+        ):
+            candidates.append(
+                {
+                    "id": item_id,
+                    "status": status,
+                    "observation": f"Observed reproducible behavior {index}.",
+                    "causal_hypothesis": f"Mechanism hypothesis {index}.",
+                    "mechanism": f"Candidate intervention {index}.",
+                    "predicted_signature": f"Predicted signature {index}.",
+                    "falsifier": f"Disconfirming outcome {index}.",
+                    "cheap_test": f"Small distinguishing test {index}.",
+                    "nearest_work_delta": f"Remaining novelty delta {index}.",
+                    "estimated_cost": {"su": 1, "jobs": 1, "persistent_entries": 2},
+                }
+            )
+        path = self.root / "CANDIDATE_PORTFOLIO.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": CAMPAIGN.PORTFOLIO_SCHEMA_VERSION,
+                    "mission_sha256": state["mission_sha256"],
+                    "route_sha256": state["route"]["sha256"],
+                    "created_at": CAMPAIGN.utc_now(),
+                    "active_candidate_id": candidate_id,
+                    "candidates": candidates,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.record_artifact("candidate_portfolio", path, "provisional")
+        return path
+
     def novelty_audit_payload(
         self,
         idea_report: Path,
         *,
         candidate_id: str = "adaptive-replay",
     ) -> dict[str, object]:
+        portfolio = self.write_candidate_portfolio(candidate_id=candidate_id)
+        state = CAMPAIGN.load_state(self.root)
         searches = {
             category: [f"{category} adaptive replay"]
             for category in CAMPAIGN.NOVELTY_SEARCH_CATEGORIES
@@ -272,6 +350,9 @@ class CampaignTests(unittest.TestCase):
             "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
             "candidate_id": candidate_id,
             "idea_report_sha256": CAMPAIGN.sha256_file(idea_report),
+            "mission_sha256": state["mission_sha256"],
+            "route_sha256": state["route"]["sha256"],
+            "candidate_portfolio_sha256": CAMPAIGN.sha256_file(portfolio),
             "searched_at": CAMPAIGN.utc_now(),
             "mechanism_without_brand": "Replay only outputs whose stability score exceeds an adaptive threshold.",
             "claim_class": "new_mechanism",
@@ -419,7 +500,194 @@ class CampaignTests(unittest.TestCase):
         state = CAMPAIGN.load_state(self.root)
         self.assertEqual(state["status"], "draft")
         self.assertEqual(state["control"]["state"], "waiting_human")
-        self.assertEqual(CAMPAIGN.count_entries(self.root), 2)
+        self.assertEqual(state["schema_version"], CAMPAIGN.SCHEMA_VERSION)
+        self.assertEqual(state["route"]["status"], "resolved")
+        self.assertEqual(CAMPAIGN.count_entries(self.root), 3)
+
+    def test_audio_mission_starts_with_unresolved_composable_route(self) -> None:
+        self.init_audio()
+        state = CAMPAIGN.load_state(self.root)
+        self.assertEqual(state["mission"]["domain_packs"], ["audio"])
+        self.assertEqual(state["route"]["status"], "unresolved")
+        self.assertIn("audio", state["adapter_registry"]["packs"])
+
+    def test_route_cannot_omit_a_mission_fixed_adapter(self) -> None:
+        registry = CAMPAIGN.adapter_registry.load_registry()
+        mission = {
+            "schema_version": CAMPAIGN.MISSION_SCHEMA_VERSION,
+            "objective": "Optimize TTS inference without changing the task.",
+            "exploration_mode": "directed",
+            "domain_packs": ["audio"],
+            "acceptable_contributions": ["new_system"],
+            "diagnostic_as_final": False,
+            "fallback_policy": "return_to_discovery",
+            "human_evaluation_policy": "pause_when_required",
+            "target_output": "paper",
+            "adapter_selection": {
+                "task": ["audio.speech-generation"],
+                "model": ["agent_select"],
+                "lever": ["core.systems"],
+                "evidence": ["agent_select"],
+                "constraint": [],
+            },
+        }
+        CAMPAIGN.validate_mission(mission, registry)
+        with self.assertRaisesRegex(CAMPAIGN.CampaignError, "mission-fixed task"):
+            CAMPAIGN.build_route(
+                mission,
+                CAMPAIGN.sha256_json(mission),
+                registry,
+                [
+                    "audio.speech-understanding",
+                    "audio.encoder-discriminative",
+                    "core.systems",
+                    "core.system-measurement",
+                    "audio.reference-task-evaluation",
+                ],
+                reason="incorrectly switched from TTS to ASR",
+            )
+
+    def test_embedded_mission_cannot_diverge_from_mission_artifact(self) -> None:
+        self.init()
+        self.approve()
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["mission"]["objective"] = "silently changed objective"
+        with self.assertRaisesRegex(CAMPAIGN.CampaignError, "immutable MISSION.json"):
+            CAMPAIGN.validate_route(CAMPAIGN.load_state(self.root))
+
+    def test_route_set_resolves_audio_systems_dependencies(self) -> None:
+        self.init_audio()
+        self.approve()
+        code, output, error = self.call(
+            "route-set",
+            str(self.root),
+            "--adapters",
+            ",".join(
+                (
+                    "audio.speech-understanding",
+                    "audio.encoder-discriminative",
+                    "core.systems",
+                    "core.system-measurement",
+                    "audio.reference-task-evaluation",
+                )
+            ),
+            "--reason",
+            "measured encoder opportunity",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("audio.encoder-discriminative", output)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertEqual(state["route"]["status"], "resolved")
+        self.assertIn("audio.packed-media", state["route"]["adapters"])
+
+    def test_route_set_rejects_missing_evidence_dependency(self) -> None:
+        self.init_audio()
+        self.approve()
+        code, _, error = self.call(
+            "route-set",
+            str(self.root),
+            "--adapters",
+            "audio.speech-understanding,audio.encoder-discriminative,core.systems,core.system-measurement",
+            "--reason",
+            "incomplete route",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("missing required evidence", error)
+
+    def test_human_evaluation_policy_forbid_rejects_tts_route(self) -> None:
+        self.init_audio(human_policy="forbid")
+        self.approve()
+        code, _, error = self.call(
+            "route-set",
+            str(self.root),
+            "--adapters",
+            ",".join(
+                (
+                    "audio.speech-generation",
+                    "audio.diffusion-flow",
+                    "core.optimization-rl",
+                    "core.controlled-evidence",
+                    "core.optimization-dynamics",
+                    "audio.reference-task-evaluation",
+                    "audio.perceptual-generation-evaluation",
+                    "core.human-evaluation",
+                )
+            ),
+            "--reason",
+            "TTS preference optimization",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("requires human evaluation", error)
+
+    def test_perceptual_tts_route_requires_human_artifact_and_detects_tampering(self) -> None:
+        self.init_audio()
+        self.approve()
+        adapters = ",".join(
+            (
+                "audio.speech-generation",
+                "audio.diffusion-flow",
+                "audio.generative-quality-control",
+                "core.controlled-evidence",
+                "audio.reference-task-evaluation",
+                "audio.perceptual-generation-evaluation",
+                "core.human-evaluation",
+            )
+        )
+        code, _, error = self.call(
+            "route-set",
+            str(self.root),
+            "--adapters",
+            adapters,
+            "--reason",
+            "TTS perceptual quality mechanism",
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertIn("human_evaluation", CAMPAIGN.required_completion_artifacts(state))
+        with CAMPAIGN.locked_state(self.root) as mutable:
+            mutable["route"]["human_evaluation"] = "never"
+        with self.assertRaisesRegex(CAMPAIGN.CampaignError, "changed after resolution"):
+            CAMPAIGN.required_completion_artifacts(CAMPAIGN.load_state(self.root))
+
+    def test_human_evaluation_is_bound_to_current_claim_lineage(self) -> None:
+        self.init()
+        self.approve()
+        _, audit, _ = self.record_method_clearance()
+        state = CAMPAIGN.load_state(self.root)
+        portfolio = json.loads(
+            CAMPAIGN.artifact_file(state, "candidate_portfolio").read_text(encoding="utf-8")
+        )
+        evidence = {
+            "schema_version": CAMPAIGN.HUMAN_EVALUATION_SCHEMA_VERSION,
+            "status": "complete",
+            "mission_sha256": state["mission_sha256"],
+            "route_sha256": state["route"]["sha256"],
+            "candidate_id": portfolio["active_candidate_id"],
+            "novelty_audit_sha256": CAMPAIGN.sha256_file(audit),
+            "evidence_sha256": "a" * 64,
+            "protocol": "new_study",
+            "source": "packed blinded ratings fixture",
+            "population": "documented eligible listeners",
+            "blinded": True,
+            "rater_count": 20,
+            "judgment_count": 200,
+            "metrics": {"preference_rate": 0.6},
+            "limitations": ["unit-test fixture"],
+        }
+        path = self.root / "HUMAN_EVALUATION.json"
+        path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        CAMPAIGN.validate_human_evaluation(state, path)
+
+        bad = dict(evidence)
+        bad["candidate_id"] = "backup-one"
+        bad_path = self.root / "BAD_HUMAN_EVALUATION.json"
+        bad_path.write_text(json.dumps(bad, indent=2) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(CAMPAIGN.CampaignError, "active candidate"):
+            CAMPAIGN.validate_human_evaluation(state, bad_path)
+
+        with CAMPAIGN.locked_state(self.root) as mutable:
+            mutable["control"]["state"] = "waiting_human"
+        self.record_artifact("human_evaluation", path, "accepted")
 
     def test_campaign_root_under_codex_is_rejected(self) -> None:
         bad = self.codex_root / "Result_bad" / "campaign"
@@ -701,7 +969,14 @@ class CampaignTests(unittest.TestCase):
             path.write_text(f"# {name}\n", encoding="utf-8")
             self.record_artifact(name, path, "provisional")
         self.assertEqual(
-            self.call("phase", str(self.root), "ideas", "--reason", "brief and literature complete")[0],
+            self.call("phase", str(self.root), "discovery", "--reason", "brief and literature complete")[0],
+            0,
+        )
+        discovery = self.root / "DISCOVERY_REPORT.md"
+        discovery.write_text("# Observations and opportunities\n", encoding="utf-8")
+        self.record_artifact("discovery_report", discovery, "provisional")
+        self.assertEqual(
+            self.call("phase", str(self.root), "portfolio", "--reason", "route and observations fixed")[0],
             0,
         )
         idea = self.write_idea_report()
@@ -742,8 +1017,21 @@ class CampaignTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("exactly one phase", error)
 
-    def test_derivative_idea_allows_diagnostic_baseline_but_not_method_claim(self) -> None:
+    def test_derivative_idea_returns_to_discovery_when_mission_forbids_fallback(self) -> None:
         self.init()
+        self.approve()
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        self.record_cold_review(audit, decision="derivative", claim_class="new_application")
+        code, _, error = self.add_batch("diagnostic-baseline", "baseline")
+        self.assertNotEqual(code, 0)
+        self.assertIn("requires returning to discovery", error)
+        code, _, error = self.add_batch("derivative-main", "main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("requires returning to discovery", error)
+
+    def test_explicit_diagnostic_mission_allows_baseline_but_not_primary_stage(self) -> None:
+        self.init(allow_diagnostic_final=True)
         self.approve()
         idea = self.write_idea_report()
         audit = self.write_novelty_audit(idea)
@@ -752,7 +1040,7 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         code, _, error = self.add_batch("derivative-main", "main")
         self.assertNotEqual(code, 0)
-        self.assertIn("diagnostic track", error)
+        self.assertIn("requires returning to discovery", error)
 
     def test_changing_idea_report_invalidates_novelty_clearance(self) -> None:
         self.init()
@@ -762,6 +1050,36 @@ class CampaignTests(unittest.TestCase):
         code, _, error = self.add_batch("stale-clearance-main", "main")
         self.assertNotEqual(code, 0)
         self.assertIn("changed after registration", error)
+
+    def test_claim_experiment_cannot_cross_candidate_lineage(self) -> None:
+        self.init()
+        self.approve()
+        self.record_method_clearance()
+        code, _, error = self.add_batch("old-candidate-main", "main")
+        self.assertEqual(code, 0, error)
+
+        state = CAMPAIGN.load_state(self.root)
+        portfolio_path = CAMPAIGN.artifact_file(state, "candidate_portfolio")
+        portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+        portfolio["active_candidate_id"] = "backup-one"
+        portfolio["created_at"] = CAMPAIGN.utc_now()
+        for candidate in portfolio["candidates"]:
+            if candidate["id"] == "adaptive-replay":
+                candidate["status"] = "backup"
+            elif candidate["id"] == "backup-one":
+                candidate["status"] = "active"
+        portfolio_path.write_text(json.dumps(portfolio, indent=2) + "\n", encoding="utf-8")
+        self.record_artifact("candidate_portfolio", portfolio_path, "provisional")
+
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(
+            idea,
+            payload=self.novelty_audit_payload(idea, candidate_id="backup-one"),
+        )
+        self.record_cold_review(audit)
+        code, _, error = self.call("submit", str(self.root), "--id", "old-candidate-main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("different candidate or novelty lineage", error)
 
     def test_skill_revision_change_requires_explicit_paused_adoption(self) -> None:
         self.init()
@@ -1155,7 +1473,10 @@ class CampaignTests(unittest.TestCase):
 
     def record_completion_artifacts(self) -> dict[str, Path]:
         idea, audit, review = self.record_method_clearance()
+        state = CAMPAIGN.load_state(self.root)
         paths: dict[str, Path] = {
+            "mission": Path(state["artifacts"]["mission"]["path"]),
+            "candidate_portfolio": Path(state["artifacts"]["candidate_portfolio"]["path"]),
             "idea_report": idea,
             "novelty_audit": audit,
             "novelty_review": review,
@@ -1194,7 +1515,7 @@ class CampaignTests(unittest.TestCase):
             check=True,
         )
         for name, path in paths.items():
-            if name in {"idea_report", "novelty_audit", "novelty_review"}:
+            if name in {"mission", "candidate_portfolio", "idea_report", "novelty_audit", "novelty_review"}:
                 continue
             assurance = "provisional" if name == "claim_audit" else "deterministic"
             code, _, error = self.call(
