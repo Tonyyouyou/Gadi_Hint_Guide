@@ -19,6 +19,7 @@ Use `$run-on-gadi` as the infrastructure authority. This skill owns the research
 6. Never compute on a login node or persistent-session host. Those hosts may edit, search, reason, compile small files, submit PBS, and monitor at most once per ten minutes.
 7. Never invoke raw `qsub` or `qdel` in an autonomous campaign. Use this skill's campaign CLI. A campaign approval is bounded permission, not unlimited cluster access.
 8. Never use `--dangerously-bypass-approvals-and-sandbox`, an infinite `--full-auto` loop, or a scheduler as a scientific reviewer.
+9. Never treat a coined name, cross-domain transfer, component bundle, or positive pilot as method novelty. Planning and method experiments require a hash-bound audit plus a controller-attested review from a fresh thread. Same-family review remains scientifically `provisional`.
 
 ## Locate the Tools
 
@@ -33,7 +34,7 @@ PYTHON=/home/561/xz4320/miniconda3/bin/python3
 
 Use this existing modern Python only for the lightweight control CLI; do not install packages into it. Scientific dependencies remain in immutable `.sqsh` images.
 
-Before initializing, read [references/campaign-contract.md](references/campaign-contract.md). Before each research phase, read the matching section of [references/research-workflow.md](references/research-workflow.md).
+Before initializing, read [references/campaign-contract.md](references/campaign-contract.md). Before each research phase, read the matching section of [references/research-workflow.md](references/research-workflow.md). Before proposing, selecting, or revising an idea, read [references/novelty-audit.md](references/novelty-audit.md).
 
 ## Start or Resume
 
@@ -92,15 +93,16 @@ For a deterministic three-hour training run, prefer batch. For a ten-hour adapti
 Use this ordered lifecycle; a pivot may return to an earlier phase only with a recorded reason:
 
 1. `literature`: turn the broad direction into a compact `RESEARCH_BRIEF.md`; search current primary literature; build a deduplicated evidence table.
-2. `ideas`: generate several falsifiable ideas; test novelty, feasibility, compute cost, and likely failure modes; preserve eliminated ideas in one report.
-3. `planning`: choose an active hypothesis; freeze datasets/splits/metrics/baselines/seeds and claim ceilings in `RESEARCH_CONTRACT.md` and `EXPERIMENT_PLAN.md` before looking at main results.
-4. `implementation`: reuse a credible base implementation where possible; make every parameter and output path explicit; write compact machine-readable metrics.
-5. `sanity`: run the smallest witness first. Verify real ground truth, imports, GPU kernels, output marker, memory, jobfs, and file count.
-6. `experiments`: run baseline before main method, then replication seeds, ablations, and stress tests. Change one scientific question at a time and log negative results.
-7. `review`: give cold artifact paths to a fresh reviewer. Same-family Codex review is `provisional`; only a different-family reviewer or deterministic verifier may record `accepted`.
-8. `synthesis`: audit experiment integrity, map every claim to raw results, report uncertainty and limitations, and write `NARRATIVE_REPORT.md`.
-9. `paper`: plan figures/tables, write English LaTeX, compile from a clean build directory, and retain only final sources, figures, bibliography, and PDF.
-10. `audit`: verify numerical claims, citations, artifact freshness, and paper compilation; write a final report that states the actual assurance class.
+2. `ideas`: generate several falsifiable mechanisms; remove branded names, decompose primitives, search target and adjacent fields, and preserve eliminated ideas in one report.
+3. `novelty_review`: record the bound `NOVELTY_AUDIT.json`, then hand off to `needs_novelty_review`. Only the controller's fresh reviewer may write `NOVELTY_REVIEW.json`.
+4. `planning`: proceed only after the cold-review gate classifies the work as a method or diagnostic track; freeze datasets/splits/metrics/baselines/seeds and claim ceilings.
+5. `implementation`: reuse a credible base implementation where possible; make every parameter and output path explicit; write compact machine-readable metrics.
+6. `sanity`: run the smallest witness first. Verify real ground truth, imports, GPU kernels, output marker, memory, jobfs, and file count.
+7. `experiments`: run baseline before main method, then replication seeds, ablations, and stress tests. Change one scientific question at a time and log negative results.
+8. `review`: give experiment-integrity artifact paths to a fresh reviewer. Same-family Codex review is `provisional`; only a different-family reviewer or deterministic verifier may record `accepted`.
+9. `synthesis`: audit experiment integrity, map every claim to raw results, report uncertainty and limitations, and write `NARRATIVE_REPORT.md`.
+10. `paper`: plan figures/tables, write English LaTeX, compile from a clean build directory, and retain only final sources, figures, bibliography, and PDF.
+11. `audit`: refresh stale novelty searches, verify numerical claims, citations, artifact freshness, and paper compilation; write a final report that states the actual assurance class.
 
 The detailed artifact and decision contract is in [references/research-workflow.md](references/research-workflow.md). The adaptation from the local ARIS checkout is documented in [references/aris-adaptation.md](references/aris-adaptation.md).
 
@@ -117,6 +119,8 @@ Every experiment must declare:
 - expected maximum persistent entries
 - a deterministic success file such as `metrics.json`
 - completed dependencies
+
+`sanity` and `profile` may be registered before novelty clearance when compatible frozen inputs already exist. Environment/data publication scripts may be previewed but not submitted before a resolved method or diagnostic classification. `baseline`, `audit`, and `paper` require that classification. `pilot`, `main`, and `ablation` require `plausibly_novel` plus `new_mechanism` or `new_combination`; both registration and submission recheck the gate.
 
 Use `{RESULT_DIR}`, `{PBS_JOBFS}`, `{WORKSPACE}`, and `{DATA_ROOT}` placeholders in command arguments. The worker substitutes them without shell evaluation. `{RESULT_DIR}` is attempt-local jobfs staging during execution, not a direct gdata write path; compact output is validated and atomically published only after success.
 
@@ -146,11 +150,14 @@ The first command previews. The second is permitted only after the campaign gran
 - enforces a single writer
 - polls PBS no more often than 600 seconds
 - invokes or resumes one `codex exec` turn only when action is needed
+- launches `needs_novelty_review` in a new non-resumed adversarial thread and attests that its thread ID differs from the author thread
 - pauses if Codex exits without an explicit handoff
 - stores one bounded rotating log under the campaign root
 - resumes from `campaign.json` after controller or persistent-session failure
 
 Read [references/persistent-control.md](references/persistent-control.md) before starting it. Do not parse `persistent-sessions list` output in automation.
+
+Each campaign pins the skill repository commit and skill-tree hash. A changed installed skill pauses the campaign instead of silently changing its rules. After reviewing an update and confirming no jobs are active, pause the campaign and run `campaign.py skill-adopt --by USER --reason REASON`, then resume explicitly.
 
 ## Stop, Pause, and Handoff
 
@@ -164,10 +171,10 @@ Before every Codex turn exits, write exactly one control handoff:
   --reason "jobs 123 and 124 must finish before analysis"
 ```
 
-Use `waiting_human` for a real scientific/budget decision, `waiting_time` with `--wake-at`, `paused` for a safety problem, and `complete` only after the completion audit passes.
+Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `waiting_human` for a real scientific/budget decision, `waiting_time` with `--wake-at`, `paused` for a safety problem, and `complete` only after the completion audit passes.
 
 ## Completion Standard
 
-The goal is not complete because training ended or a PDF exists. Before `handoff --state complete`, inspect every required artifact and read [references/paper-completion.md](references/paper-completion.md). The CLI requires the research brief, idea report, research contract, experiment plan/ledger, results, experiment and claim audits, narrative report, paper source/PDF, citation audit, and final report.
+The goal is not complete because training ended or a PDF exists. Before `handoff --state complete`, inspect every required artifact and read [references/paper-completion.md](references/paper-completion.md). The CLI requires the research brief, idea report, novelty audit/review, research contract, experiment plan/ledger, results, experiment and claim audits, narrative report, paper source/PDF, citation audit, and final report. Novelty artifacts must still be hash-bound and no more than 30 days old.
 
 If only same-family semantic review was available, complete the campaign with `overall_assurance: provisional` and never call the paper submission-ready. Negative or inconclusive research may still produce an honest paper, but the title, abstract, claims, and limitations must match the evidence.

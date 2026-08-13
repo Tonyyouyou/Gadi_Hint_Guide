@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -100,6 +102,168 @@ class ControllerTests(unittest.TestCase):
             code = controller.main(list(args))
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def prepare_novelty_review(self) -> Path:
+        idea = self.root / "IDEA_REPORT.md"
+        idea.write_text("# Candidate\n\nAdaptive stability controls selective replay.\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "artifact",
+                        str(self.root),
+                        "--name",
+                        "idea_report",
+                        "--path",
+                        str(idea),
+                        "--assurance",
+                        "provisional",
+                    ]
+                ),
+                0,
+            )
+        searches = {
+            category: [f"author {category} query"]
+            for category in campaign.NOVELTY_SEARCH_CATEGORIES
+        }
+        sources = [
+            {
+                "id": f"a{index}",
+                "title": f"Author source {index}",
+                "url": f"https://example.org/a{index}",
+                "year": 2024,
+                "checked_locator": f"Section {index}",
+                "mechanism_evidence": "The full text describes the relevant replay primitive.",
+                "primary_source": True,
+                "full_text_checked": True,
+            }
+            for index in range(1, 4)
+        ]
+        audit = self.root / "NOVELTY_AUDIT.json"
+        audit.write_text(
+            json.dumps(
+                {
+                    "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
+                    "candidate_id": "candidate-one",
+                    "idea_report_sha256": campaign.sha256_file(idea),
+                    "searched_at": campaign.utc_now(),
+                    "mechanism_without_brand": "Adaptive stability controls selective replay.",
+                    "claim_class": "new_mechanism",
+                    "verdict": "plausibly_novel",
+                    "primitives": [{"id": "adaptive-replay", "description": "Replay selected unstable regions."}],
+                    "searches": searches,
+                    "sources": sources,
+                    "nearest_neighbors": [
+                        {
+                            "source_id": source["id"],
+                            "mechanism_overlap": "Replay primitive.",
+                            "remaining_delta": "No adaptive boundary control.",
+                        }
+                        for source in sources
+                    ],
+                    "brand_substitution_test": {
+                        "outcome": "materially_changed",
+                        "explanation": "The mechanism survives removal of the application name.",
+                    },
+                    "combination_test": {
+                        "existing_combination": False,
+                        "decomposition": "stability plus selective replay",
+                        "non_obvious_interaction": "Stability selects boundaries.",
+                    },
+                    "strongest_rejection": "This may be confidence-triggered recomputation.",
+                    "author_rebuttal": "Checked systems do not select replay boundaries.",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "artifact",
+                        str(self.root),
+                        "--name",
+                        "novelty_audit",
+                        "--path",
+                        str(audit),
+                        "--assurance",
+                        "provisional",
+                    ]
+                ),
+                0,
+            )
+        review_sources = [
+            {
+                "id": f"r{index}",
+                "title": f"Reviewer source {index}",
+                "url": f"https://review.example.org/r{index}",
+                "year": 2025,
+                "checked_locator": f"Methods {index}",
+                "mechanism_evidence": "The methods provide independent mechanism evidence.",
+                "primary_source": True,
+                "full_text_checked": True,
+            }
+            for index in range(1, 4)
+        ]
+        review = self.root / "NOVELTY_REVIEW.json"
+        review.write_text(
+            json.dumps(
+                {
+                    "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
+                    "candidate_id": "candidate-one",
+                    "audit_sha256": campaign.sha256_file(audit),
+                    "reviewed_at": campaign.utc_now(),
+                    "independent_context": True,
+                    "decision": "plausibly_novel",
+                    "claim_class": "new_mechanism",
+                    "reviewer_searches": {
+                        category: [f"reviewer {category} query"]
+                        for category in campaign.NOVELTY_SEARCH_CATEGORIES
+                    },
+                    "sources": review_sources,
+                    "prior_checks": {
+                        "earliest": {"source_id": "r1", "conclusion": "Earliest primitive."},
+                        "closest": {"source_id": "r2", "conclusion": "Closest lacks coupling."},
+                        "newest": {"source_id": "r3", "conclusion": "Newest remains distinct."},
+                        "exact_combination": {"source_id": None, "conclusion": "No exact combination."},
+                    },
+                    "primitive_overlap": [
+                        {
+                            "primitive_id": "adaptive-replay",
+                            "source_ids": ["r1", "r2", "r3"],
+                            "assessment": "Primitive is known but the proposed control interaction was not found.",
+                        }
+                    ],
+                    "strongest_rejection": "Could reduce to confidence-triggered recomputation.",
+                    "author_rebuttal_assessment": "Rebuttal survives for boundary selection only.",
+                    "blocking_overlaps": [],
+                    "required_changes": [],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with campaign.locked_state(self.root) as state:
+            state["phase"] = "novelty_review"
+            state["control"].update({"state": "agent_running", "thread_id": "author-thread"})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "handoff",
+                        str(self.root),
+                        "--state",
+                        "needs_novelty_review",
+                        "--reason",
+                        "unit-test review request",
+                    ]
+                ),
+                0,
+            )
+        return review
+
     def test_preview_does_not_launch_agent(self) -> None:
         code, output, error = self.call(str(self.root))
         self.assertEqual(code, 0, error)
@@ -122,6 +286,48 @@ class ControllerTests(unittest.TestCase):
         resumed = controller.codex_command("codex", self.workspace, state, self.root)
         self.assertLess(resumed.index("--approve-for-me"), resumed.index("resume"))
         self.assertEqual(resumed[resumed.index("--add-dir") + 1], str(self.root))
+
+    def test_novelty_reviewer_command_always_starts_a_fresh_thread(self) -> None:
+        state = campaign.load_state(self.root)
+        state["control"]["thread_id"] = "author-thread"
+        audit = {
+            "candidate_id": "blind-candidate",
+            "mechanism_without_brand": "Blind mechanism description.",
+            "primitives": [{"id": "p1", "description": "Primitive one."}],
+        }
+        command = controller.novelty_codex_command("codex", self.workspace, self.root, audit)
+        self.assertNotIn("resume", command)
+        self.assertIn("--json", command)
+        self.assertIn("cold, adversarial novelty reviewer", command[-1])
+        self.assertIn("blind-candidate", command[-1])
+        self.assertIn("do not open IDEA_REPORT.md", command[-1])
+
+    def test_controller_attests_valid_review_from_distinct_thread(self) -> None:
+        review = self.prepare_novelty_review()
+        fake_codex = self.base / "fake-reviewer-codex"
+        cli = SCRIPTS / "campaign.py"
+        fake_codex.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} artifact {shlex.quote(str(self.root))} "
+            f"--name novelty_review --path {shlex.quote(str(review))} --assurance provisional\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} handoff {shlex.quote(str(self.root))} "
+            "--state needs_agent --reason 'independent novelty review complete'\n"
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"reviewer-thread\"}'\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        with mock.patch.object(controller.campaign, "live_preflight", return_value={}):
+            controller.run_novelty_reviewer(self.root, str(fake_codex))
+        state = campaign.load_state(self.root)
+        record = state["artifacts"]["novelty_review"]
+        self.assertTrue(record["cold_review"])
+        self.assertEqual(record["review_thread_id"], "reviewer-thread")
+        self.assertEqual(record["author_thread_id"], "author-thread")
+        self.assertEqual(state["control"]["thread_id"], "author-thread")
+        self.assertEqual(state["control"]["novelty_review_thread_id"], "reviewer-thread")
+        self.assertEqual(state["control"]["state"], "needs_agent")
+        self.assertEqual(state["control"]["agent_turns"], 1)
 
     def test_missing_agent_handoff_pauses_instead_of_spinning(self) -> None:
         fake_codex = self.base / "fake-codex"
@@ -150,6 +356,17 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(state["control"]["state"], "paused")
         self.assertEqual(state["control"]["agent_turns"], 0)
         self.assertIn("avoid duplicate agents", state["control"]["reason"])
+
+    def test_stale_novelty_reviewer_state_pauses_instead_of_launching_duplicate(self) -> None:
+        with campaign.locked_state(self.root) as state:
+            state["control"].update(
+                {"state": "novelty_reviewer_running", "reason": "simulated controller loss"}
+            )
+        code, _, error = self.call(str(self.root), "--start")
+        self.assertEqual(code, 0, error)
+        state = campaign.load_state(self.root)
+        self.assertEqual(state["status"], "paused")
+        self.assertIn("avoid duplicate reviewers", state["control"]["reason"])
 
     def test_agent_turn_budget_sets_consistent_paused_status(self) -> None:
         with campaign.locked_state(self.root) as state:

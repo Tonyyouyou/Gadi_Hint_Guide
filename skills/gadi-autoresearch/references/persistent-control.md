@@ -58,15 +58,27 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 | State | Controller action |
 |---|---|
 | `needs_agent` | start/resume one `codex exec` turn |
+| `needs_novelty_review` | start one fresh, non-resumed adversarial reviewer thread |
 | `waiting_pbs` | refresh tracked batch jobs at the permitted cadence, or wake the agent to inspect a recorded interactive tmux pane |
 | `waiting_time` | sleep until recorded UTC time |
 | `waiting_human` | exit and preserve state |
 | `paused` | exit and preserve the safety reason |
 | `complete` | exit |
 
-Before launching Codex it reruns live project/inode/file-envelope preflight and changes the state to `agent_running`. Codex must write a handoff. A failed preflight, nonzero exit, or missing handoff pauses the campaign, preventing a hot loop.
+Before launching Codex it verifies the pinned skill revision, reruns live
+project/inode/file-envelope preflight, and changes the state to `agent_running` or
+`novelty_reviewer_running`. Codex must write a handoff. A failed revision check/preflight,
+nonzero exit, or missing handoff pauses the campaign, preventing a hot loop.
 
-The controller uses Codex's `--approve-for-me` automatic command review so a deliberately approved unattended campaign can progress without an interactive prompt. It keeps the source repository as the workspace and adds only the recorded campaign root as an extra writable directory. This does not bypass the workspace sandbox, user rules, the campaign CLI, or its project/SU/job/GPU/deadline/file capabilities. Raw `qsub`/`qdel` remain forbidden. The controller requires and reuses one thread ID; it pauses rather than creating a new session file on every wake if the CLI returns no resumable ID. It never passes dangerous approval/sandbox bypass flags and rotates a single log at 5 MiB.
+The controller uses Codex's `--approve-for-me` automatic command review so a deliberately approved unattended campaign can progress without an interactive prompt. It keeps the source repository as the workspace and adds only the recorded campaign root as an extra writable directory. This does not bypass the workspace sandbox, user rules, the campaign CLI, or its project/SU/job/GPU/deadline/file capabilities. Raw `qsub`/`qdel` remain forbidden.
+
+The author uses one resumable thread ID; the controller pauses rather than creating a new
+author session on every wake if the CLI returns no resumable ID. Novelty review is the narrow
+exception: each requested review starts without `resume`, receives an adversarial role prompt,
+and may only register the review plus handoff. The controller rejects an author/reviewer thread
+ID match, audit mutation, invalid schema, non-provisional same-family assurance, or missing
+handoff before attaching `cold_review` metadata. It never passes dangerous approval/sandbox
+bypass flags and rotates a single log at 5 MiB.
 
 ## Failure Recovery
 
@@ -76,7 +88,10 @@ After login disconnect, persistent-session restart, Codex failure, or controller
 2. Verify active PBS jobs with one permitted refresh.
 3. Read the bounded controller and relevant PBS log.
 4. Confirm `campaign.json`, workspace Git commit, `.sqsh`, data objects, and result markers still exist.
-5. A stale `agent_running` state pauses on restart to avoid launching a duplicate Codex process. Inspect the named tmux/controller process, then use `campaign.py resume` with a concrete reason only after no agent is running.
+5. A stale `agent_running` or `novelty_reviewer_running` state pauses on restart to avoid launching a duplicate Codex process. Inspect the named tmux/controller process, then use `campaign.py resume` with a concrete reason only after no agent is running.
 6. If authentication/session resume fails, pause and deliberately start a new Codex thread from campaign state rather than reconstructing progress from tmux text.
+
+If the installed skill revision changed, inspect the diff and ensure no job is active before
+using `campaign.py skill-adopt`. Do not edit the pinned commit/tree in `campaign.json`.
 
 PBS jobs are the compute source of truth. The Codex conversation is useful context, not the durable experiment ledger.

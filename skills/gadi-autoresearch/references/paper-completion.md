@@ -29,12 +29,13 @@ Clone only into the campaign workspace or another user-approved path under `/g/d
 
 Before final completion:
 
-1. **Experiment integrity**: real ground truth/proxy labels, no leakage, no phantom files, no selective normalization, honest scope.
-2. **Result-to-claim**: every headline and abstract claim has raw evidence and respects its claim ceiling.
-3. **Paper claim audit**: every number, comparison, dataset size, seed count, and tolerance agrees with canonical machine-readable results.
-4. **Citation audit**: every cited work exists, metadata is correct, and the cited passage actually supports the surrounding statement.
-5. **Compilation check**: clean LaTeX build succeeds, references resolve, figures exist, and the final PDF is nonempty/readable.
-6. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, and unresolved risks appear in the paper.
+1. **Novelty refresh**: bound audit/review are no more than 30 days old, still match the idea, and the paper uses the permitted method or diagnostic claim class.
+2. **Experiment integrity**: real ground truth/proxy labels, no leakage, no phantom files, no selective normalization, honest scope.
+3. **Result-to-claim**: every headline and abstract claim has raw evidence and respects its claim ceiling.
+4. **Paper claim audit**: every number, comparison, dataset size, seed count, and tolerance agrees with canonical machine-readable results.
+5. **Citation audit**: every cited work exists, metadata is correct, and the cited passage actually supports the surrounding statement.
+6. **Compilation check**: clean LaTeX build succeeds, references resolve, figures exist, and the final PDF is nonempty/readable.
+7. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, and unresolved risks appear in the paper.
 
 Semantic audits performed only by fresh Codex reviewers remain `provisional`. Deterministic compilation, schema, metric-trace, and file checks may be recorded as `deterministic`. Do not upgrade provisional science to submission-ready wording.
 
@@ -46,6 +47,8 @@ Record these canonical names with `campaign.py artifact`:
 |---|---|
 | `research_brief` | `RESEARCH_BRIEF.md` |
 | `idea_report` | `IDEA_REPORT.md` |
+| `novelty_audit` | `NOVELTY_AUDIT.json` |
+| `novelty_review` | `NOVELTY_REVIEW.json` |
 | `research_contract` | `RESEARCH_CONTRACT.md` |
 | `experiment_plan` | `EXPERIMENT_PLAN.md` |
 | `experiment_ledger` | `EXPERIMENT_LEDGER.jsonl` |
@@ -62,6 +65,7 @@ Record these canonical names with `campaign.py artifact`:
 
 - broad direction and final research question
 - selected idea and important pivots
+- novelty decision, claim class, closest prior work, and reviewer thread provenance
 - exact Git commit, `.sqsh`, data versions, projects, jobs, GPU/SU estimates, and file-count delta
 - primary results with uncertainty and baseline comparison
 - negative results and remaining limitations

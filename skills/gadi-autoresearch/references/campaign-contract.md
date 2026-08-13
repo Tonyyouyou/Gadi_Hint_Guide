@@ -4,10 +4,11 @@
 
 1. Storage and approval
 2. Environment and data staging
-3. Experiment registration
-4. Batch and interactive execution
-5. Monitoring and handoff
-6. State and file-count behavior
+3. Skill revision and novelty gate
+4. Experiment registration
+5. Batch and interactive execution
+6. Monitoring and handoff
+7. State and file-count behavior
 
 ## Storage and Approval
 
@@ -34,6 +35,32 @@ Run current account/inode checks:
 ```
 
 The four compute projects are dynamic allocations, not storage spill areas. Persistent campaign data stays in `wa66`; each experiment's charging project must scientifically cover that work.
+
+## Skill Revision and Novelty Gate
+
+`campaign.json` pins the Git commit and tree hash of this skill. The controller pauses if the
+installed revision changes. This prevents an unattended campaign from silently acquiring new
+scientific or cluster permissions. To adopt a reviewed update, first confirm no jobs are active
+and pause or hand off to the user (an unapproved draft is already eligible):
+
+```bash
+"$PYTHON" "$CAMPAIGN" skill-adopt "$ROOT" \
+  --by USER --reason "reviewed installed skill revision and migration"
+"$PYTHON" "$CAMPAIGN" resume "$ROOT" --reason "new skill revision adopted"
+```
+
+Forward phase changes advance exactly one phase. Backward pivots are allowed with a reason.
+Planning and later phases require the bound novelty artifacts described in
+`novelty-audit.md`. The author requests the controller-only reviewer with:
+
+```bash
+"$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state needs_novelty_review \
+  --reason "author audit complete; request independent adversarial search"
+```
+
+The control state `novelty_reviewer_running` cannot change phases, approval, storage, or
+experiments and may record only `novelty_review`. The controller supplies the cold-review
+attestation after verifying a distinct thread and unchanged audit.
 
 ## Environment and Data Staging
 
@@ -67,6 +94,12 @@ After the job succeeds, record the published storage object:
 
 Never persist an expanded conda/venv, pip cache, Hugging Face cache, extracted sample tree, or compilation directory.
 
+The first command is available while ideas are being audited because it has no scheduler or
+storage side effect. `--execute` requires both `allow_storage_publish` and a resolved novelty
+classification. Build or acquire persistent inputs only for a method or diagnostic track that
+survived cold review; do not spend copyq SU or create durable objects merely to make an idea
+feel concrete.
+
 ## Experiment Registration
 
 The workspace must be the root of a Git repository below `/g/data/wa66/Xiangyu`, with an initial commit and no submodules. It cannot contain the campaign directory or be contained by it. Commit a deliberate, clean implementation before registering a batch experiment. The CLI records that commit, the `.sqsh` size/mtime identity, and metadata identities for the campaign's packed data inputs. A queued worker revalidates them and expands the registered commit in jobfs, so later control-host edits cannot silently change the run. `interactive-run` records the latest clean commit on every debug cycle before expanding it in the current allocation.
@@ -90,6 +123,16 @@ Commands are argument vectors, not shell strings. Supported literal substitution
 - `{DATA_ROOT}`: `/g/data/wa66/Xiangyu/Data`
 
 The job runs through `run_sqsh.sh`; HOME, source, data, environments, `.codex`, and the durable campaign are read-only inside the container. The command writes only to jobfs staging. After a zero exit, the worker requires the success marker, rejects symlinks/special files and an entry-count overflow, copies into a hidden campaign-side staging directory, revalidates it, and atomically renames it to the durable result path. A failed or oversized run publishes nothing. Worker success remains `finishing` until a permitted `qstat` refresh confirms the PBS terminal exit and revalidates durable output.
+
+Stages are evidence classes, not labels chosen to bypass review:
+
+- `sanity`, `profile`: infrastructure or feasibility checks; novelty clearance is not required
+- `baseline`, `audit`, `paper`: require a resolved method or diagnostic classification
+- `pilot`, `main`, `ablation`: require the cold reviewer to permit a new mechanism or new combination
+
+The CLI checks the classification when the experiment is registered and again immediately
+before batch or interactive submission. A stale or changed artifact therefore blocks a
+previously registered experiment.
 
 For later work, declare dependencies and an evidence stage:
 
@@ -189,7 +232,11 @@ Record phase changes and canonical artifacts:
   --path "$ROOT/RESULTS.md" --assurance deterministic
 ```
 
-Every agent turn ends with one handoff. `complete` runs the artifact gate and refuses active jobs, stale/empty artifacts, an invalid PDF, or missing required evidence. A safety pause can be resumed only with an explicit reason:
+Every agent turn ends with one handoff. In `novelty_review`, the author must use
+`needs_novelty_review` until an attested verdict exists; the reviewer hands back to
+`needs_agent`. `complete` runs the artifact gate and refuses active jobs, stale/empty or
+expired novelty artifacts, an invalid PDF, or missing required evidence. A safety pause can be
+resumed only with an explicit reason:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" resume "$ROOT" --reason "inode issue resolved and live preflight is green"
@@ -205,3 +252,4 @@ Every agent turn ends with one handoff. `complete` runs the artifact gate and re
 - The file budget also reserves result objects/directories, combined PBS logs, and bounded controller state rather than counting only scientific output files.
 - The campaign compares current campaign entries, new files added to the Git workspace since initialization, published environment/data objects, planned outputs, and control-file reserve against the approved persistent-file ceiling and live `wa66` inode headroom.
 - The controller keeps at most `controller.log` and `controller.previous.log`.
+- Novelty state adds two compact JSON artifacts inside the existing envelope, not paper/PDF caches or one file per query.

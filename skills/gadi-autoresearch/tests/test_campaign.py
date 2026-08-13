@@ -150,14 +150,20 @@ class CampaignTests(unittest.TestCase):
         code, _, error = self.call(*arguments)
         self.assertEqual(code, 0, error)
 
-    def add_sanity(self, *, expected_files: int = 8) -> tuple[int, str, str]:
+    def add_batch(
+        self,
+        experiment_id: str,
+        stage: str,
+        *,
+        expected_files: int = 8,
+    ) -> tuple[int, str, str]:
         return self.call(
             "experiment-add",
             str(self.root),
             "--id",
-            "sanity-001",
+            experiment_id,
             "--stage",
-            "sanity",
+            stage,
             "--mode",
             "batch",
             "--queue",
@@ -181,6 +187,9 @@ class CampaignTests(unittest.TestCase):
             "--command-json",
             '["/env/bin/python","{WORKSPACE}/train.py","--output","{RESULT_DIR}/metrics.json"]',
         )
+
+    def add_sanity(self, *, expected_files: int = 8) -> tuple[int, str, str]:
+        return self.add_batch("sanity-001", "sanity", expected_files=expected_files)
 
     def add_interactive(self, *, ncpus: int = 12) -> tuple[int, str, str]:
         return self.call(
@@ -213,6 +222,197 @@ class CampaignTests(unittest.TestCase):
             "--command-json",
             '["/env/bin/python","{WORKSPACE}/train.py","--output","{RESULT_DIR}/metrics.json"]',
         )
+
+    def record_artifact(self, name: str, path: Path, assurance: str) -> None:
+        code, _, error = self.call(
+            "artifact",
+            str(self.root),
+            "--name",
+            name,
+            "--path",
+            str(path),
+            "--assurance",
+            assurance,
+        )
+        self.assertEqual(code, 0, error)
+
+    def write_idea_report(self) -> Path:
+        path = self.root / "IDEA_REPORT.md"
+        path.write_text(
+            "# Candidate\n\nUse an adaptive replay decision to preserve stable outputs.\n",
+            encoding="utf-8",
+        )
+        self.record_artifact("idea_report", path, "provisional")
+        return path
+
+    def novelty_audit_payload(
+        self,
+        idea_report: Path,
+        *,
+        candidate_id: str = "adaptive-replay",
+    ) -> dict[str, object]:
+        searches = {
+            category: [f"{category} adaptive replay"]
+            for category in CAMPAIGN.NOVELTY_SEARCH_CATEGORIES
+        }
+        sources = [
+            {
+                "id": f"a{index}",
+                "title": f"Primary paper {index}",
+                "url": f"https://example.org/paper-{index}",
+                "year": 2024,
+                "checked_locator": f"Section {index}",
+                "mechanism_evidence": "The full text specifies the compared replay mechanism.",
+                "primary_source": True,
+                "full_text_checked": True,
+            }
+            for index in range(1, 4)
+        ]
+        return {
+            "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
+            "candidate_id": candidate_id,
+            "idea_report_sha256": CAMPAIGN.sha256_file(idea_report),
+            "searched_at": CAMPAIGN.utc_now(),
+            "mechanism_without_brand": "Replay only outputs whose stability score exceeds an adaptive threshold.",
+            "claim_class": "new_mechanism",
+            "verdict": "plausibly_novel",
+            "primitives": [
+                {"id": "stability-score", "description": "Estimate whether an emitted prefix is stable."},
+                {"id": "selective-replay", "description": "Replay only unstable output regions."},
+            ],
+            "searches": searches,
+            "sources": sources,
+            "nearest_neighbors": [
+                {
+                    "source_id": source["id"],
+                    "mechanism_overlap": "Shares one replay or stability primitive.",
+                    "remaining_delta": "Does not couple adaptive stability with selective replay.",
+                }
+                for source in sources
+            ],
+            "brand_substitution_test": {
+                "outcome": "materially_changed",
+                "explanation": "Removing the task label still leaves an adaptive replay mechanism.",
+            },
+            "combination_test": {
+                "existing_combination": False,
+                "decomposition": "stability scoring plus selective replay",
+                "non_obvious_interaction": "The score controls replay boundaries rather than only confidence reporting.",
+            },
+            "strongest_rejection": "Confidence-triggered recomputation may already implement the same mechanism.",
+            "author_rebuttal": "The checked work uses confidence for stopping, not replay-boundary selection.",
+        }
+
+    def write_novelty_audit(
+        self,
+        idea_report: Path,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> Path:
+        path = self.root / "NOVELTY_AUDIT.json"
+        path.write_text(
+            json.dumps(payload or self.novelty_audit_payload(idea_report), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.record_artifact("novelty_audit", path, "provisional")
+        return path
+
+    def novelty_review_payload(
+        self,
+        audit: Path,
+        *,
+        decision: str = "plausibly_novel",
+        claim_class: str = "new_mechanism",
+    ) -> dict[str, object]:
+        audit_payload = json.loads(audit.read_text(encoding="utf-8"))
+        sources = [
+            {
+                "id": f"r{index}",
+                "title": f"Independent primary paper {index}",
+                "url": f"https://review.example.org/paper-{index}",
+                "year": 2025,
+                "checked_locator": f"Methods section {index}",
+                "mechanism_evidence": "The methods expose the independently compared primitive.",
+                "primary_source": True,
+                "full_text_checked": True,
+            }
+            for index in range(1, 4)
+        ]
+        return {
+            "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
+            "candidate_id": audit_payload["candidate_id"],
+            "audit_sha256": CAMPAIGN.sha256_file(audit),
+            "reviewed_at": CAMPAIGN.utc_now(),
+            "independent_context": True,
+            "decision": decision,
+            "claim_class": claim_class,
+            "reviewer_searches": {
+                category: [f"independent {category} replay"]
+                for category in CAMPAIGN.NOVELTY_SEARCH_CATEGORIES
+            },
+            "sources": sources,
+            "prior_checks": {
+                "earliest": {"source_id": "r1", "conclusion": "Earliest primitive precedent."},
+                "closest": {"source_id": "r2", "conclusion": "Closest system lacks the interaction."},
+                "newest": {"source_id": "r3", "conclusion": "Newest checked work remains distinct."},
+                "exact_combination": {"source_id": None, "conclusion": "No exact combination was found."},
+            },
+            "primitive_overlap": [
+                {
+                    "primitive_id": "stability-score",
+                    "source_ids": ["r1", "r2"],
+                    "assessment": "Known alone, but not as the replay-boundary controller.",
+                },
+                {
+                    "primitive_id": "selective-replay",
+                    "source_ids": ["r2", "r3"],
+                    "assessment": "Known alone, but the adaptive coupling was not found.",
+                },
+            ],
+            "strongest_rejection": "The proposal could be ordinary confidence-triggered recomputation.",
+            "author_rebuttal_assessment": "The rebuttal survives only for the coupled boundary rule.",
+            "blocking_overlaps": [],
+            "required_changes": [],
+        }
+
+    def record_cold_review(
+        self,
+        audit: Path,
+        *,
+        decision: str = "plausibly_novel",
+        claim_class: str = "new_mechanism",
+    ) -> Path:
+        review = self.root / "NOVELTY_REVIEW.json"
+        review.write_text(
+            json.dumps(
+                self.novelty_review_payload(audit, decision=decision, claim_class=claim_class),
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["control"]["state"] = "novelty_reviewer_running"
+        self.record_artifact("novelty_review", review, "provisional")
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["artifacts"]["novelty_review"].update(
+                {
+                    "cold_review": True,
+                    "review_thread_id": "review-thread-test",
+                    "author_thread_id": "author-thread-test",
+                    "reviewed_audit_sha256": CAMPAIGN.sha256_file(audit),
+                }
+            )
+            state["control"].update(
+                {"state": "needs_agent", "novelty_review_thread_id": "review-thread-test"}
+            )
+        return review
+
+    def record_method_clearance(self) -> tuple[Path, Path, Path]:
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        review = self.record_cold_review(audit)
+        return idea, audit, review
 
     def test_init_creates_compact_draft_state(self) -> None:
         self.init()
@@ -379,6 +579,7 @@ class CampaignTests(unittest.TestCase):
     def test_main_experiment_requires_sanity_evidence(self) -> None:
         self.init()
         self.approve()
+        self.record_method_clearance()
         code, _, error = self.call(
             "experiment-add",
             str(self.root),
@@ -414,6 +615,197 @@ class CampaignTests(unittest.TestCase):
             code, _, error = self.call("submit", str(self.root), "--id", "main-001")
         self.assertNotEqual(code, 0)
         self.assertIn("sanity", error)
+
+    def test_method_experiment_is_blocked_but_profile_is_allowed_before_novelty_review(self) -> None:
+        self.init()
+        self.approve()
+        code, _, error = self.add_batch("main-before-review", "main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("novelty_audit", error)
+        code, _, error = self.add_batch("profile-before-review", "profile")
+        self.assertEqual(code, 0, error)
+
+    def test_novelty_audit_requires_every_search_route(self) -> None:
+        self.init()
+        self.approve()
+        idea = self.write_idea_report()
+        payload = self.novelty_audit_payload(idea)
+        searches = payload["searches"]
+        assert isinstance(searches, dict)
+        del searches["adjacent_fields"]
+        audit = self.root / "NOVELTY_AUDIT.json"
+        audit.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        code, _, error = self.call(
+            "artifact",
+            str(self.root),
+            "--name",
+            "novelty_audit",
+            "--path",
+            str(audit),
+            "--assurance",
+            "provisional",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("adjacent_fields", error)
+
+    def test_author_thread_cannot_register_its_own_novelty_review(self) -> None:
+        self.init()
+        self.approve()
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        review = self.root / "NOVELTY_REVIEW.json"
+        review.write_text(
+            json.dumps(self.novelty_review_payload(audit), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.call(
+            "artifact",
+            str(self.root),
+            "--name",
+            "novelty_review",
+            "--path",
+            str(review),
+            "--assurance",
+            "provisional",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("fresh reviewer", error)
+
+    def test_new_review_request_invalidates_previous_verdict(self) -> None:
+        self.init()
+        self.approve()
+        self.record_method_clearance()
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["phase"] = "novelty_review"
+        code, _, error = self.call(
+            "handoff",
+            str(self.root),
+            "--state",
+            "needs_novelty_review",
+            "--reason",
+            "refresh the independent search",
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertNotIn("novelty_review", state["artifacts"])
+        self.assertIsNotNone(state["control"]["novelty_review_requested_at"])
+        code, _, error = self.add_batch("main-after-review-request", "main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("novelty_review", error)
+
+    def test_planning_phase_requires_attested_cold_review(self) -> None:
+        self.init()
+        self.approve()
+        for name in ("research_brief", "literature"):
+            path = self.root / f"{name}.md"
+            path.write_text(f"# {name}\n", encoding="utf-8")
+            self.record_artifact(name, path, "provisional")
+        self.assertEqual(
+            self.call("phase", str(self.root), "ideas", "--reason", "brief and literature complete")[0],
+            0,
+        )
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        self.assertEqual(
+            self.call("phase", str(self.root), "novelty_review", "--reason", "candidate audited")[0],
+            0,
+        )
+        code, _, error = self.call(
+            "phase",
+            str(self.root),
+            "planning",
+            "--reason",
+            "attempt before cold review",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("novelty_review", error)
+        self.record_cold_review(audit)
+        code, _, error = self.call(
+            "phase",
+            str(self.root),
+            "planning",
+            "--reason",
+            "cold review passed",
+        )
+        self.assertEqual(code, 0, error)
+
+    def test_forward_phase_skip_is_rejected(self) -> None:
+        self.init()
+        self.approve()
+        code, _, error = self.call(
+            "phase",
+            str(self.root),
+            "planning",
+            "--reason",
+            "attempted shortcut",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("exactly one phase", error)
+
+    def test_derivative_idea_allows_diagnostic_baseline_but_not_method_claim(self) -> None:
+        self.init()
+        self.approve()
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        self.record_cold_review(audit, decision="derivative", claim_class="new_application")
+        code, _, error = self.add_batch("diagnostic-baseline", "baseline")
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("derivative-main", "main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("diagnostic track", error)
+
+    def test_changing_idea_report_invalidates_novelty_clearance(self) -> None:
+        self.init()
+        self.approve()
+        idea, _, _ = self.record_method_clearance()
+        idea.write_text("# Changed candidate\n", encoding="utf-8")
+        code, _, error = self.add_batch("stale-clearance-main", "main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed after registration", error)
+
+    def test_skill_revision_change_requires_explicit_paused_adoption(self) -> None:
+        self.init()
+        self.approve()
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["skill_reference"]["commit"] = "0" * 40
+        code, _, error = self.add_sanity()
+        self.assertNotEqual(code, 0)
+        self.assertIn("differs from the campaign pin", error)
+        self.assertEqual(
+            self.call("handoff", str(self.root), "--state", "paused", "--reason", "review skill update")[0],
+            0,
+        )
+        code, _, error = self.call(
+            "skill-adopt",
+            str(self.root),
+            "--by",
+            "unit-test",
+            "--reason",
+            "reviewed novelty-gate update",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(
+            self.call("resume", str(self.root), "--reason", "skill revision adopted")[0],
+            0,
+        )
+        self.assertEqual(self.add_sanity()[0], 0)
+
+    def test_unapproved_draft_can_adopt_reviewed_skill_revision(self) -> None:
+        self.init()
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["skill_reference"]["commit"] = "0" * 40
+        code, _, error = self.call(
+            "skill-adopt",
+            str(self.root),
+            "--by",
+            "unit-test",
+            "--reason",
+            "reviewed revision before campaign approval",
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertNotEqual(state["skill_reference"]["commit"], "0" * 40)
+        self.assertEqual(state["status"], "draft")
 
     def test_expected_files_are_enforced_before_submission(self) -> None:
         self.init(max_files=8)
@@ -703,6 +1095,11 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         self.assertFalse(self.qsub_log.exists())
         with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, _, error = self.call(*arguments, "--execute")
+        self.assertNotEqual(code, 0)
+        self.assertIn("novelty_audit", error)
+        self.record_method_clearance()
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
             code, output, error = self.call(*arguments, "--execute")
         self.assertEqual(code, 0, error)
         self.assertIn("12345.gadi-pbs", output)
@@ -757,12 +1154,19 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("missing artifacts", error)
 
     def record_completion_artifacts(self) -> dict[str, Path]:
-        paths: dict[str, Path] = {}
+        idea, audit, review = self.record_method_clearance()
+        paths: dict[str, Path] = {
+            "idea_report": idea,
+            "novelty_audit": audit,
+            "novelty_review": review,
+        }
         paper_output = self.root / "paper"
         paper_output.mkdir(exist_ok=True)
         paper_source_dir = self.workspace / "paper"
         paper_source_dir.mkdir(exist_ok=True)
         for name in CAMPAIGN.REQUIRED_COMPLETION_ARTIFACTS:
+            if name in paths:
+                continue
             if name == "paper_source":
                 path = paper_source_dir / "main.tex"
                 path.write_text("\\documentclass{article}\\begin{document}test\\end{document}\n", encoding="utf-8")
@@ -790,6 +1194,8 @@ class CampaignTests(unittest.TestCase):
             check=True,
         )
         for name, path in paths.items():
+            if name in {"idea_report", "novelty_audit", "novelty_review"}:
+                continue
             assurance = "provisional" if name == "claim_audit" else "deterministic"
             code, _, error = self.call(
                 "artifact",

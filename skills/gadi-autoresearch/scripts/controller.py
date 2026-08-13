@@ -20,6 +20,7 @@ import campaign
 
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
+NOVELTY_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "novelty-audit.md"
 
 
 def rotate_log(path: Path) -> None:
@@ -73,6 +74,19 @@ def pause_campaign(root: Path, reason: str) -> None:
         campaign.add_history(state, "controller_paused", reason=reason)
 
 
+def ensure_skill_revision(root: Path) -> bool:
+    with campaign.locked_state(root) as state:
+        try:
+            campaign.require_current_skill(state)
+            campaign.pin_missing_skill_reference(state)
+        except (campaign.CampaignError, OSError) as exc:
+            state["status"] = "paused"
+            state["control"].update({"state": "paused", "reason": f"skill revision check failed: {exc}"})
+            campaign.add_history(state, "controller_skill_revision_failed", reason=str(exc))
+            return False
+    return True
+
+
 def wake_due(root: Path, state: dict[str, Any]) -> bool:
     if state["control"]["state"] != "waiting_time":
         return False
@@ -104,7 +118,29 @@ def agent_prompt(root: Path) -> str:
     return f"""Use $gadi-autoresearch and resume the approved campaign at {root}.
 Read campaign.json and the research workspace directly. Continue the full idea-to-paper workflow within the recorded project, SU, GPU, walltime, deadline, and persistent-file envelope. Use campaign.py for all experiment registration, previews, submissions, refreshes, artifacts, phases, and handoffs. Never call raw qsub/qdel, never compute on the login or persistent-session host, and never write workload data under .codex.
 
+Before planning or method experiments, read {NOVELTY_REFERENCE} and satisfy the machine-enforced novelty gate. Describe each candidate as mechanism primitives without its coined name, search exact/synonym/task/adjacent/combination/code/citation-neighbor routes, compare at least three checked primary sources, and write the bound IDEA_REPORT and NOVELTY_AUDIT.json artifacts. If the campaign predates this gate, stop implementation and move backward to novelty_review. Never write or register NOVELTY_REVIEW.json from the author thread: enter novelty_review and hand off with state needs_novelty_review so the controller launches a fresh adversarial reviewer. A rejected or application-only idea may continue only on its recorded diagnostic track; revise the idea before claiming a new method.
+
 Work until one of these is true: PBS work must be awaited, explicit human input is required, a scheduled wake is appropriate, a safety/budget condition requires pause, or every completion artifact is verified and the campaign can be completed. Before this Codex turn exits, call campaign.py handoff with the correct state and concrete reason. A missing handoff pauses the controller rather than spinning another agent turn."""
+
+
+def novelty_reviewer_prompt(root: Path, audit: dict[str, Any]) -> str:
+    blind_packet = json.dumps(
+        {
+            "candidate_id": audit["candidate_id"],
+            "mechanism_without_brand": audit["mechanism_without_brand"],
+            "primitives": audit["primitives"],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    return f"""Use $gadi-autoresearch as the cold, adversarial novelty reviewer for {root}.
+This is intentionally a fresh Codex thread. You are not the author and must not continue implementation, edit the idea report or novelty audit, change phases/storage/approval, or register/submit/run experiments. Read {NOVELTY_REFERENCE} and campaign.json. Start from only this blind mechanism packet; do not open IDEA_REPORT.md, NOVELTY_AUDIT.json, LITERATURE.md, or the author's cited sources until you have independently chosen and inspected your own candidate sources:
+
+{blind_packet}
+
+Browse primary sources and inspect full papers plus official code when available. Independently cover exact mechanism, synonyms, task-local work, adjacent fields, primitive combinations, code search, and backward/forward citations. Seek the earliest prior, closest prior, newest relevant prior, and an exact-combination prior. Apply the brand-substitution and A+B decomposition tests. Default to derivative or unresolved unless the remaining delta is a technically non-obvious mechanism or interaction, not a renamed application, engineering integration, metric choice, or scale-up.
+
+After fixing your independent source set and preliminary judgment, read the author artifacts, test the author's strongest rebuttal, and inspect additional cited sources where needed. Write the exact schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_REVIEW.json. Bind it to the recorded audit hash, include at least three independently checked primary sources and a comparison for every primitive, then register it with assurance provisional using campaign.py. Hand off to needs_agent with a concrete verdict. If a reliable review cannot be completed, hand off to waiting_human instead of guessing. The controller will reject the review if this thread matches the author thread, the audit changed, the source workspace changes, the schema is incomplete, an old review is reused, or the required handoff is absent. A fresh same-family review is process-independent but remains scientifically provisional."""
 
 
 def codex_command(codex_bin: str, workspace: Path, state: dict[str, Any], root: Path) -> list[str]:
@@ -116,9 +152,20 @@ def codex_command(codex_bin: str, workspace: Path, state: dict[str, Any], root: 
     return [*common, "--json", "-C", str(workspace), prompt]
 
 
+def novelty_codex_command(
+    codex_bin: str,
+    workspace: Path,
+    root: Path,
+    audit: dict[str, Any],
+) -> list[str]:
+    common = [codex_bin, "exec", "--approve-for-me", "--add-dir", str(root)]
+    return [*common, "--json", "-C", str(workspace), novelty_reviewer_prompt(root, audit)]
+
+
 def run_agent(root: Path, codex_bin: str) -> None:
     state = campaign.load_state(root)
     campaign.require_approved(state, "allow_auto_agent")
+    campaign.require_current_skill(state)
     control = state["control"]
     if int(control["agent_turns"]) >= int(state["approval"]["max_agent_turns"]):
         pause_campaign(root, "approved Codex turn budget exhausted")
@@ -141,6 +188,7 @@ def run_agent(root: Path, codex_bin: str) -> None:
         if current["status"] != "active" or current["control"]["state"] != "needs_agent":
             return
         campaign.require_approved(current, "allow_auto_agent")
+        campaign.require_current_skill(current)
         current["control"].update({"state": "agent_running", "reason": "controller launched Codex"})
         campaign.add_history(current, "controller_transition", control_updates={"state": "agent_running"})
     command = codex_command(codex_bin, workspace, current, root)
@@ -176,10 +224,11 @@ def run_agent(root: Path, codex_bin: str) -> None:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "thread.started" or not current["control"].get("thread_id"):
+            if event.get("type") == "thread.started":
                 candidate = nested_thread_id(event)
                 if candidate:
                     discovered_thread = candidate
+        process.stdout.close()
         returncode = process.wait()
         log.write(f"[{campaign.utc_now()}] exit: {returncode}\n")
     finally:
@@ -205,12 +254,187 @@ def run_agent(root: Path, codex_bin: str) -> None:
         campaign.add_history(updated, "agent_turn_finished", returncode=returncode, thread_id=discovered_thread or updated["control"].get("thread_id"))
 
 
+def run_novelty_reviewer(root: Path, codex_bin: str) -> None:
+    state = campaign.load_state(root)
+    campaign.require_approved(state, "allow_auto_agent")
+    campaign.require_current_skill(state)
+    control = state["control"]
+    if int(control["agent_turns"]) >= int(state["approval"]["max_agent_turns"]):
+        pause_campaign(root, "approved Codex turn budget exhausted before novelty review")
+        return
+    try:
+        audit_path = campaign.artifact_file(state, "novelty_audit")
+        audit = campaign.validate_novelty_audit(state, audit_path)
+        audit_sha256 = campaign.sha256_file(audit_path)
+    except (campaign.CampaignError, OSError) as exc:
+        pause_campaign(root, f"novelty reviewer input validation failed: {exc}")
+        return
+    author_thread_id = control.get("thread_id")
+    review_requested_at = control.get("novelty_review_requested_at")
+    try:
+        campaign.live_preflight(state)
+    except (campaign.CampaignError, OSError) as exc:
+        pause_campaign(root, f"novelty reviewer preflight failed: {exc}")
+        return
+    workspace = campaign.canonical(state["workspace"], strict=True)
+    campaign.validate_workspace(workspace)
+    try:
+        reviewer_workspace_commit = campaign.git_workspace_info(
+            workspace,
+            require_clean=True,
+        )["commit"]
+    except (campaign.CampaignError, OSError) as exc:
+        pause_campaign(root, f"novelty reviewer requires a clean source workspace: {exc}")
+        return
+    if not shutil.which(codex_bin):
+        pause_campaign(root, f"Codex executable is unavailable: {codex_bin}")
+        return
+
+    with campaign.locked_state(root) as current:
+        if current["status"] != "active" or current["control"]["state"] != "needs_novelty_review":
+            return
+        campaign.require_approved(current, "allow_auto_agent")
+        campaign.require_current_skill(current)
+        try:
+            current_audit = campaign.artifact_file(current, "novelty_audit")
+            audit_unchanged = campaign.sha256_file(current_audit) == audit_sha256
+        except (campaign.CampaignError, OSError) as exc:
+            current["status"] = "paused"
+            current["control"].update({
+                "state": "paused",
+                "reason": f"novelty audit became invalid before reviewer launch: {exc}",
+            })
+            campaign.add_history(current, "controller_novelty_review_input_changed", reason=str(exc))
+            return
+        if not audit_unchanged:
+            current["status"] = "paused"
+            current["control"].update({
+                "state": "paused",
+                "reason": "novelty audit changed before the cold reviewer launch",
+            })
+            campaign.add_history(current, "controller_novelty_review_input_changed", reason="hash changed")
+            return
+        previous_review = current["artifacts"].pop("novelty_review", None)
+        current["control"].update({
+            "state": "novelty_reviewer_running",
+            "reason": "controller launched fresh adversarial novelty reviewer",
+        })
+        campaign.add_history(
+            current,
+            "controller_novelty_review_started",
+            audit_sha256=audit_sha256,
+            author_thread_id=author_thread_id,
+            invalidated_review_sha256=(previous_review or {}).get("sha256"),
+        )
+
+    command = novelty_codex_command(codex_bin, workspace, root, audit)
+    log_path = root / "controller.log"
+    rotate_log(log_path)
+    discovered_thread = None
+    log = log_path.open("a", encoding="utf-8")
+    returncode = 1
+    try:
+        log.write(f"\n[{campaign.utc_now()}] novelty-review launch: {' '.join(command[:4])}\n")
+        log.flush()
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            pause_campaign(root, f"failed to launch novelty reviewer: {exc}")
+            raise campaign.CampaignError(f"failed to launch novelty reviewer: {exc}") from exc
+        assert process.stdout is not None
+        for line in process.stdout:
+            log.write(line)
+            if log.tell() >= MAX_LOG_BYTES:
+                log.flush()
+                log.close()
+                rotate_log(log_path)
+                log = log_path.open("a", encoding="utf-8")
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "thread.started":
+                candidate = nested_thread_id(event)
+                if candidate:
+                    discovered_thread = candidate
+        process.stdout.close()
+        returncode = process.wait()
+        log.write(f"[{campaign.utc_now()}] novelty-review exit: {returncode}\n")
+    finally:
+        log.close()
+
+    with campaign.locked_state(root) as updated:
+        updated["control"]["agent_turns"] += 1
+        updated["control"]["last_agent_at"] = campaign.utc_now()
+        failure: str | None = None
+        if returncode != 0:
+            failure = f"novelty reviewer exited with status {returncode}; inspect controller.log"
+        elif not discovered_thread:
+            failure = "novelty reviewer returned no thread ID"
+        elif discovered_thread == author_thread_id:
+            failure = "novelty reviewer reused the author thread instead of a fresh context"
+        else:
+            try:
+                current_audit = campaign.artifact_file(updated, "novelty_audit")
+                if campaign.sha256_file(current_audit) != audit_sha256:
+                    raise campaign.CampaignError("novelty audit changed during cold review")
+                review_path = campaign.artifact_file(updated, "novelty_review")
+                campaign.validate_novelty_review(updated, review_path)
+                review_record = updated["artifacts"]["novelty_review"]
+                if review_record.get("assurance") != "provisional":
+                    raise campaign.CampaignError("same-family novelty review was not registered as provisional")
+                if review_requested_at and campaign.parse_time(
+                    review_record["recorded_at"]
+                ) < campaign.parse_time(review_requested_at):
+                    raise campaign.CampaignError("novelty reviewer reused an artifact from before this request")
+                current_workspace = campaign.git_workspace_info(workspace, require_clean=True)
+                if current_workspace["commit"] != reviewer_workspace_commit:
+                    raise campaign.CampaignError("novelty reviewer changed the source workspace commit")
+            except (campaign.CampaignError, OSError) as exc:
+                failure = f"cold novelty review validation failed: {exc}"
+        if not failure and updated["control"]["state"] == "novelty_reviewer_running":
+            failure = "novelty reviewer exited without the required campaign handoff"
+        if not failure and updated["control"]["state"] not in {"needs_agent", "waiting_human", "paused"}:
+            failure = f"novelty reviewer used an invalid handoff: {updated['control']['state']}"
+
+        if failure:
+            updated["status"] = "paused"
+            updated["control"].update({"state": "paused", "reason": failure})
+        else:
+            review_record = updated["artifacts"]["novelty_review"]
+            review_record.update({
+                "cold_review": True,
+                "review_thread_id": discovered_thread,
+                "author_thread_id": author_thread_id,
+                "reviewed_audit_sha256": audit_sha256,
+            })
+            updated["control"]["novelty_review_thread_id"] = discovered_thread
+        campaign.add_history(
+            updated,
+            "novelty_review_turn_finished",
+            returncode=returncode,
+            review_thread_id=discovered_thread,
+            author_thread_id=author_thread_id,
+            validated=not failure,
+            failure=failure,
+        )
+
+
 def describe_action(state: dict[str, Any]) -> str:
     control = state["control"]["state"]
     if state["status"] != "active":
         return f"stop: campaign status is {state['status']}"
     if control == "needs_agent":
         return "invoke or resume one Codex turn"
+    if control == "needs_novelty_review":
+        return "launch one fresh adversarial novelty-review thread"
     if control == "waiting_pbs":
         return "refresh PBS no more than once every 600 seconds"
     if control == "waiting_time":
@@ -222,18 +446,26 @@ def tick(root: Path, codex_bin: str) -> bool:
     state = campaign.load_state(root)
     if state["status"] != "active":
         return False
+    if not ensure_skill_revision(root):
+        return False
+    state = campaign.load_state(root)
     if campaign.parse_time(state["approval"]["deadline"]) <= dt.datetime.now(dt.timezone.utc):
         pause_campaign(root, "campaign approval deadline expired")
         return False
     control = state["control"]["state"]
-    if control == "agent_running":
+    if control in {"agent_running", "novelty_reviewer_running"}:
+        duplicate_reason = (
+            "stale agent_running state; inspect the control host before resuming to avoid duplicate agents"
+            if control == "agent_running"
+            else "stale novelty_reviewer_running state; inspect the control host before resuming to avoid duplicate reviewers"
+        )
         with campaign.locked_state(root) as current:
             current["status"] = "paused"
             current["control"].update({
                 "state": "paused",
-                "reason": "stale agent_running state; inspect the control host before resuming to avoid duplicate agents",
+                "reason": duplicate_reason,
             })
-            campaign.add_history(current, "controller_paused_stale_agent")
+            campaign.add_history(current, "controller_paused_stale_process", stale_state=control)
         return False
     if control == "waiting_time":
         wake_due(root, state)
@@ -245,6 +477,8 @@ def tick(root: Path, codex_bin: str) -> bool:
         control = state["control"]["state"]
     if control == "needs_agent":
         run_agent(root, codex_bin)
+    elif control == "needs_novelty_review":
+        run_novelty_reviewer(root, codex_bin)
     return campaign.load_state(root)["status"] == "active"
 
 
