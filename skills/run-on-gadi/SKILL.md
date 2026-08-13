@@ -1,6 +1,6 @@
 ---
 name: run-on-gadi
-description: Prepare, validate, submit, monitor, and troubleshoot NCI Gadi PBS jobs with strict inode-safe storage and environment workflows. Use for tmux-backed qsub -I debugging; production batch jobs; Gadi CPU/GPU work including V100, A100, and H200; PBS scripts; dynamic project/SU selection; quota and file-count checks; copyq downloads; Singularity SquashFS environments; large datasets; checkpoints; distributed PyTorch; or work using /g/data/wa66/Xiangyu.
+description: Prepare, validate, submit, monitor, and troubleshoot NCI Gadi PBS jobs with strict inode-safe storage and environment workflows. Use for persistent-session or tmux-backed qsub -I debugging; production batch jobs; bounded autoresearch campaigns; Gadi CPU/GPU work including V100, A100, and H200; PBS scripts; dynamic project/SU selection; quota and file-count checks; copyq downloads; Singularity SquashFS environments; large datasets; checkpoints; distributed PyTorch; or work using /g/data/wa66/Xiangyu.
 ---
 
 # Run on Gadi
@@ -12,10 +12,10 @@ Treat persistent file count as a first-class resource alongside SU, bytes, memor
 State one mode before acting:
 
 - **Static inspection**: read, edit, lint, and test without PBS.
-- **Interactive debug**: preserve an explicitly approved `qsub -I` terminal in login-node `tmux`, then debug only after PBS allocates a compute/GPU node.
+- **Interactive debug**: preserve an explicitly approved `qsub -I` terminal in control-host `tmux`, preferably on an NCI persistent session for multi-hour agent exploration, then debug only after PBS allocates a compute/GPU node.
 - **Production batch**: submit a standalone PBS script only after a smoke test and a separate production submission approval.
 
-Words such as "debug", "test", "try", or "interactive" never authorise a production job. Words such as "prepare", "write", or "fix the PBS script" never authorise any `qsub`. Read [references/debugging.md](references/debugging.md) for the mandatory tmux workflow and debug-to-production gate.
+Words such as "debug", "test", "try", or "interactive" never authorise a production job. Words such as "prepare", "write", or "fix the PBS script" never authorise any `qsub`. An explicitly approved `gadi-autoresearch` campaign may authorise submissions only through its validating campaign CLI and only within the recorded envelope; it never authorises raw `qsub` or `qdel`. Read [references/debugging.md](references/debugging.md) for the mandatory tmux workflow and debug-to-production gate.
 
 ## Enforce Storage Boundaries
 
@@ -88,9 +88,9 @@ python /g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/lint_pbs.py job.pb
 
 Resolve all errors. Review warnings for resource ratios, walltime tiers, network commands outside `copyq`, persistent extraction, inode-producing caches, and any workload write under `.codex`. Report estimated SU.
 
-Generate and edit scripts without extra approval. Run `qsub`, `qdel`, or destructive cleanup only when the user explicitly requests that side effect. Present a complete interactive `qsub -I` command before executing it.
+Generate and edit scripts without extra approval. Run `qsub`, `qdel`, or destructive cleanup only when the user explicitly requests that side effect. A recorded `gadi-autoresearch` envelope with `allow_auto_submit=true` counts as scoped submission approval only when `gadi-autoresearch/scripts/campaign.py` performs the live validation and submission. Present a complete interactive `qsub -I` command before executing it; an approved campaign with `allow_interactive=true` may start the previewed request through that CLI.
 
-For interactive debugging, preview [scripts/debug_session.sh](scripts/debug_session.sh) first. Only after explicit approval may it be repeated with `--start`. Do not touch an existing tmux session unless the user identifies it as the target.
+For interactive debugging, preview [scripts/debug_session.sh](scripts/debug_session.sh) first. Only after explicit approval may it be repeated with `--start`. Do not touch an existing tmux session unless the user identifies it as the target. For a multi-hour controller, preview [scripts/persistent_session.sh](scripts/persistent_session.sh); create the NCI persistent session only after approval and keep computation in PBS.
 
 ## Build Environments in JobFS
 

@@ -1,0 +1,71 @@
+# Paper Completion
+
+## Paper Construction
+
+Create a compact `PAPER_PLAN.md` from `NARRATIVE_REPORT.md`. Every section, table, and figure must map to existing evidence or be marked as a limitation/future-work item. Never create a result-shaped placeholder that could be mistaken for measured evidence.
+
+Generate figures from canonical machine-readable results with committed scripts. Retain only final figures and their small generation sources. Do not persist plot caches, per-seed images, LaTeX auxiliary trees, or multiple full PDF rounds.
+
+Write English LaTeX with this compact durable shape unless a venue requires more:
+
+```text
+paper/
+  main.tex
+  references.bib
+  figures/
+  sections/        # only when genuinely useful
+  main.pdf
+```
+
+Build auxiliary files in `$PBS_JOBFS` when compilation needs a PBS/container environment, then copy back only source, bibliography, final figures, and `main.pdf`. A short lightweight compile may run as static work if it stays within login limits; otherwise use a CPU batch job and a TeX `.sqsh`.
+
+## Required Audits
+
+Before final completion:
+
+1. **Experiment integrity**: real ground truth/proxy labels, no leakage, no phantom files, no selective normalization, honest scope.
+2. **Result-to-claim**: every headline and abstract claim has raw evidence and respects its claim ceiling.
+3. **Paper claim audit**: every number, comparison, dataset size, seed count, and tolerance agrees with canonical machine-readable results.
+4. **Citation audit**: every cited work exists, metadata is correct, and the cited passage actually supports the surrounding statement.
+5. **Compilation check**: clean LaTeX build succeeds, references resolve, figures exist, and the final PDF is nonempty/readable.
+6. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, and unresolved risks appear in the paper.
+
+Semantic audits performed only by fresh Codex reviewers remain `provisional`. Deterministic compilation, schema, metric-trace, and file checks may be recorded as `deterministic`. Do not upgrade provisional science to submission-ready wording.
+
+## Campaign Artifact Gate
+
+Record these canonical names with `campaign.py artifact`:
+
+| Name | Typical path |
+|---|---|
+| `research_brief` | `RESEARCH_BRIEF.md` |
+| `idea_report` | `IDEA_REPORT.md` |
+| `research_contract` | `RESEARCH_CONTRACT.md` |
+| `experiment_plan` | `EXPERIMENT_PLAN.md` |
+| `experiment_ledger` | `EXPERIMENT_LEDGER.jsonl` |
+| `results` | `RESULTS.md` |
+| `experiment_audit` | `EXPERIMENT_AUDIT.md` or JSON |
+| `claim_audit` | `CLAIM_AUDIT.md` or JSON |
+| `narrative_report` | `NARRATIVE_REPORT.md` |
+| `paper_source` | `paper/main.tex` |
+| `paper_pdf` | `paper/main.pdf` |
+| `citation_audit` | `paper/CITATION_AUDIT.md` or JSON |
+| `final_report` | `FINAL_REPORT.md` |
+
+`FINAL_REPORT.md` must state:
+
+- broad direction and final research question
+- selected idea and important pivots
+- exact Git commit, `.sqsh`, data versions, projects, jobs, GPU/SU estimates, and file-count delta
+- primary results with uncertainty and baseline comparison
+- negative results and remaining limitations
+- paper source and PDF paths
+- audit provenance and `overall_assurance`
+- whether the work is a draft, provisional submission candidate, or accepted-assurance candidate
+
+Commit the final paper source and evidence-generation code, leave the workspace clean, and record artifacts only after their final content is stable. `paper_source` must be a tracked `.tex` file; the completion gate records the final Git commit. Only after inspecting every recorded path and confirming no active jobs remain may the agent run:
+
+```bash
+"$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state complete \
+  --reason "all canonical artifacts inspected; no active jobs; final PDF compiles"
+```

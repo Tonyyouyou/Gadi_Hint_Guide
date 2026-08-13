@@ -18,12 +18,16 @@ module purge
 module load singularity
 
 ENV_NAME=CHANGE_ME
+ENV_TAG=CHANGE_ME
 ENV_SPEC=/absolute/path/to/CHANGE_ME.yml
+EXPECTED_SPEC_SHA256=CHANGE_ME
 CONDA_BIN=/home/561/xz4320/miniconda3/bin/conda
 BUILDER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/build_conda_sqsh.sh
 
 [[ -f "$ENV_SPEC" ]] || { echo "Missing environment spec: $ENV_SPEC" >&2; exit 1; }
+printf '%s  %s\n' "$EXPECTED_SPEC_SHA256" "$ENV_SPEC" | sha256sum --check -
 bash "$BUILDER" \
   --name "$ENV_NAME" \
+  --tag "$ENV_TAG" \
   --environment "$ENV_SPEC" \
   --conda "$CONDA_BIN"

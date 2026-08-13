@@ -57,11 +57,52 @@ class LintTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(summary["queue"], "normal")
 
+    def test_environment_template_has_deterministic_tag_and_spec_hash(self) -> None:
+        template = (SCRIPT.parents[1] / "assets" / "pbs" / "build-env-copyq.pbs").read_text(encoding="utf-8")
+        text = (
+            template.replace("#PBS -P CHANGE_ME", "#PBS -P wa66")
+            .replace(
+                "/g/data/wa66/Xiangyu/Result_CHANGE_ME/pbs-logs/build-CHANGE_ME.log",
+                "/g/data/wa66/Xiangyu/Result_lint/build-env.log",
+            )
+            .replace("ENV_NAME=CHANGE_ME", "ENV_NAME=testenv")
+            .replace("ENV_TAG=CHANGE_ME", "ENV_TAG=v1")
+            .replace("ENV_SPEC=/absolute/path/to/CHANGE_ME.yml", "ENV_SPEC=/home/561/xz4320/environment.yml")
+            .replace("EXPECTED_SPEC_SHA256=CHANGE_ME", "EXPECTED_SPEC_SHA256=" + "a" * 64)
+        )
+        errors, _, summary = self.lint_text(text)
+        self.assertEqual(errors, [])
+        self.assertEqual(summary["queue"], "copyq")
+        self.assertIn('--tag "$ENV_TAG"', text)
+        self.assertIn("sha256sum --check", text)
+
     def test_codex_workload_destination_is_rejected(self) -> None:
         self.assert_error_contains(
             BASE + "OUTPUT=/g/data/wa66/Xiangyu/.codex/model.bin\n",
-            "only read-only",
+            "approved read-only",
         )
+
+    def test_gadi_autoresearch_helper_read_is_allowed(self) -> None:
+        text = BASE + (
+            "python3 /g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch/"
+            "scripts/campaign.py worker-run /g/data/wa66/Xiangyu/Result_lint/run --id sanity\n"
+        )
+        errors, _, _ = self.lint_text(text)
+        self.assertEqual(errors, [])
+
+    def test_gadi_autoresearch_control_command_is_rejected_inside_pbs(self) -> None:
+        text = BASE + (
+            "python3 /g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch/"
+            "scripts/campaign.py submit /g/data/wa66/Xiangyu/Result_lint/run --id sanity --execute\n"
+        )
+        self.assert_error_contains(text, "only compute-side")
+
+    def test_gadi_autoresearch_controller_is_rejected_inside_pbs(self) -> None:
+        text = BASE + (
+            "python3 /g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch/"
+            "scripts/controller.py /g/data/wa66/Xiangyu/Result_lint/run --start\n"
+        )
+        self.assert_error_contains(text, "only compute-side")
 
     def test_home_log_is_rejected(self) -> None:
         text = BASE.replace(
@@ -86,10 +127,34 @@ class LintTests(unittest.TestCase):
     def test_direct_package_install_is_rejected(self) -> None:
         self.assert_error_contains(BASE + "python -m pip install torch\n", "do not install")
 
+    def test_nested_scheduler_submission_is_rejected(self) -> None:
+        self.assert_error_contains(BASE + "qsub child.pbs\n", "cannot submit/cancel jobs")
+
+    def test_codex_agent_inside_compute_job_is_rejected(self) -> None:
+        self.assert_error_contains(BASE + "codex exec 'continue research'\n", "control host")
+
+    def test_dangerous_codex_bypass_is_rejected(self) -> None:
+        self.assert_error_contains(
+            BASE + "codex exec --dangerously-bypass-approvals-and-sandbox research\n",
+            "approval bypass is forbidden",
+        )
+
     def test_persistent_download_tree_is_rejected(self) -> None:
         self.assert_error_contains(
             BASE + "DOWNLOAD_ROOT=/g/data/wa66/Xiangyu/Data/expanded\n",
             "DOWNLOAD_ROOT is transient",
+        )
+
+    def test_direct_persistent_mutation_is_rejected(self) -> None:
+        self.assert_error_contains(
+            BASE + "touch /g/data/wa66/Xiangyu/Data/loose-file\n",
+            "direct persistent/shared-filesystem mutation",
+        )
+
+    def test_direct_persistent_deletion_is_rejected(self) -> None:
+        self.assert_error_contains(
+            BASE + "rm -r /g/data/wa66/Xiangyu/Result_lint/old-run\n",
+            "direct persistent/shared-filesystem mutation",
         )
 
     def test_network_requires_copyq(self) -> None:

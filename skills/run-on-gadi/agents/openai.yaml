@@ -1,4 +1,4 @@
 interface:
   display_name: "Run on Gadi"
-  short_description: "Safe Gadi interactive debug and batch workflows"
-  default_prompt: "Use $run-on-gadi to classify this as static inspection, tmux interactive debug, or production batch, then apply the file-count-safe Gadi workflow."
+  short_description: "Safe Gadi persistent, interactive, and batch workflows"
+  default_prompt: "Use $run-on-gadi to classify this as static inspection, persistent control, tmux interactive debug, or production batch, then apply the inode-safe Gadi workflow."

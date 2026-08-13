@@ -11,10 +11,13 @@ approves the shown charge and qsub command, repeat with --start to create a
 detached tmux session containing qsub -I.
 
 Options:
-  --walltime HH:MM:SS   Debug walltime, at most 02:00:00 (default 01:00:00)
+  --walltime HH:MM:SS   Debug walltime, at most 04:00:00 (default 01:00:00)
   --mem-gb N            Override memory in whole GB
   --jobfs-gb N          Override jobfs in whole GB
   --session NAME        Unique tmux session name
+  --persistent-control-host
+                         Allow an NCI persistent-session control host whose
+                         hostname does not match gadi-login-*
   --start               Start tmux and submit the interactive job
   -h, --help            Show this help
 EOF
@@ -32,6 +35,7 @@ MEM_GB=
 JOBFS_GB=
 SESSION=
 START=0
+PERSISTENT_CONTROL_HOST=0
 
 while (($#)); do
   case "$1" in
@@ -41,6 +45,7 @@ while (($#)); do
     --mem-gb) MEM_GB=${2:?}; shift 2 ;;
     --jobfs-gb) JOBFS_GB=${2:?}; shift 2 ;;
     --session) SESSION=${2:?}; shift 2 ;;
+    --persistent-control-host) PERSISTENT_CONTROL_HOST=1; shift ;;
     --start) START=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -121,13 +126,16 @@ MINUTES=${BASH_REMATCH[2]}
 SECONDS=${BASH_REMATCH[3]}
 ((10#$MINUTES < 60 && 10#$SECONDS < 60)) || die "invalid walltime: $WALLTIME"
 WALLTIME_SECONDS=$((10#$HOURS * 3600 + 10#$MINUTES * 60 + 10#$SECONDS))
-((WALLTIME_SECONDS > 0 && WALLTIME_SECONDS <= 7200)) || \
-  die "interactive debug walltime must be greater than zero and at most 02:00:00"
+((WALLTIME_SECONDS > 0 && WALLTIME_SECONDS <= 14400)) || \
+  die "interactive debug walltime must be greater than zero and at most 04:00:00"
 
 LOGIN_HOST=$(hostname -f)
 case "$LOGIN_HOST" in
-  gadi-login-*.gadi.nci.org.au) ;;
-  *) die "run this helper on a Gadi login node, got $LOGIN_HOST" ;;
+  gadi-login-*.gadi.nci.org.au|*.ps.gadi.nci.org.au) ;;
+  *)
+    ((PERSISTENT_CONTROL_HOST == 1)) || \
+      die "run on a Gadi login node or pass --persistent-control-host inside an NCI persistent session; got $LOGIN_HOST"
+    ;;
 esac
 [[ -z "${PBS_JOBID:-}" ]] || die "do not submit a nested debug job from inside PBS"
 
@@ -187,7 +195,6 @@ if ((START == 0)); then
   exit 0
 fi
 
-[[ -z "${TMUX:-}" ]] || die "already inside tmux; run the previewed qsub command in this pane"
 command -v tmux >/dev/null 2>&1 || die "tmux is unavailable"
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   die "tmux session already exists: $SESSION"
@@ -204,4 +211,4 @@ echo "Attach on $LOGIN_HOST: tmux attach -t $SESSION"
 echo "Read without attaching:   tmux capture-pane -p -t $SESSION -S -200"
 echo "End the PBS job with 'exit', then remove the finished session:"
 echo "  tmux kill-session -t $SESSION"
-echo "The tmux socket is login-node local and will not survive a login-node restart."
+echo "The tmux socket is control-host local and will not survive a control-host restart."

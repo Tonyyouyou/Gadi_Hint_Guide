@@ -71,17 +71,48 @@ class DebugSessionTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("project must be one of", result.stderr)
 
-    def test_debug_walltime_over_two_hours_is_rejected(self) -> None:
+    def test_debug_walltime_over_four_hours_is_rejected(self) -> None:
         result = self.run_helper(
             "--kind",
             "h200",
             "--project",
             "wa66",
             "--walltime",
-            "02:00:01",
+            "04:00:01",
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("at most 02:00:00", result.stderr)
+        self.assertIn("at most 04:00:00", result.stderr)
+
+    def test_four_hour_debug_walltime_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env, _, _ = self.fake_gadi_env(Path(temp_dir))
+            result = self.run_helper(
+                "--kind",
+                "h200",
+                "--project",
+                "wa66",
+                "--walltime",
+                "04:00:00",
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Walltime:     04:00:00", result.stdout)
+
+    def test_persistent_control_host_can_be_explicitly_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env, _, _ = self.fake_gadi_env(Path(temp_dir))
+            hostname = Path(temp_dir) / "bin" / "hostname"
+            hostname.write_text("#!/bin/sh\nprintf '%s\\n' persistent-pod-123\n", encoding="utf-8")
+            hostname.chmod(0o755)
+            result = self.run_helper(
+                "--kind",
+                "a100",
+                "--project",
+                "wa66",
+                "--persistent-control-host",
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_one_node_memory_limit_is_rejected(self) -> None:
         result = self.run_helper(

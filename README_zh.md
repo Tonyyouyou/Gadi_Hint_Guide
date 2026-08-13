@@ -2,23 +2,30 @@
 
 ## Codex Skill（当前工作流）
 
-现在维护的、供 agent 使用的指南位于 [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md)。它整合了 NCI 最新文档、带日期的 H200/A100/V100 队列快照、实时额度探测、PBS 静态检查、文件数安全的环境/数据工具和可复用模板。
+现在维护两套供 agent 使用的工作流：
+
+- [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md)：负责 Gadi 存储、环境、数据、队列、交互调试、PBS 校验、提交、监控和排错。
+- [`skills/gadi-autoresearch`](skills/gadi-autoresearch/SKILL.md)：从宽泛 idea 到论文的有界、可恢复自动研究 campaign，支持 persistent control、交互探索、batch 实验、证据审计和文件数安全的紧凑状态。
 
 这个账号上已经安装为：
 
 ```text
 /g/data/wa66/Xiangyu/.codex/skills/run-on-gadi
   -> ../repos/Gadi_Hint_Guide/skills/run-on-gadi
+/g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch
+  -> ../repos/Gadi_Hint_Guide/skills/gadi-autoresearch
 ```
 
-在 Codex 中使用 `$run-on-gadi`。以下存储规则不可违反：
+在 Codex 中使用 `$run-on-gadi` 和 `$gadi-autoresearch`。以下存储规则不可违反：
 
 - `/g/data/wa66/Xiangyu/.codex` 只存 Codex 配置、skill 和 skill 源码仓库；禁止存放任务数据、模型、环境、缓存、checkpoint、日志和结果。
+- 每个小型研究 Git workspace 必须位于 `/g/data/wa66/Xiangyu` 且在 `.codex` 之外；campaign 源码和产物不能放到 HOME。
 - 展开的环境、下载、缓存和解压数据只能放在 `$PBS_JOBFS`。
 - 环境以单个 `.sqsh` 发布到 `/g/data/wa66/Xiangyu/enviroment_cache`。
 - 打包数据存到 `/g/data/wa66/Xiangyu/Data`；结果存到已有或用户明确批准的 `Result*` 目录。
 - 每次在 `wa66`、`ey69`、`po67`、`iv96` 中选择计费项目之前都重新运行实时预检；季度 KSU 和 inode 使用量是动态的。
-- 调试使用登录节点上的 `tmux` 保持经明确批准的 `qsub -I`；正式 batch 提交必须另行授权。
+- 三四小时的探索把 tmux 和轻量控制器放在 NCI persistent session，所有计算仍只在 PBS 节点中执行。
+- 交互探索最长四小时；正式/自动 batch 提交必须有单独授权，或由已记录且经过校验的 `gadi-autoresearch` campaign envelope 授权。
 
 下方旧版手工说明仅作为背景保留，其中硬编码的项目、挂载、资源数值和在 HOME 创建环境的步骤不能覆盖 skill 或 NCI 当前官方文档。
 

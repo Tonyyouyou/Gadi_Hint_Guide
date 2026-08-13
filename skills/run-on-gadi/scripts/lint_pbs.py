@@ -16,7 +16,10 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 LIMITS_PATH = SKILL_ROOT / "references" / "queue-limits.json"
 CODEX_ROOT = "/g/data/wa66/Xiangyu/.codex"
 PERSISTENT_ROOT = "/g/data/wa66/Xiangyu"
-SKILL_ROOT_PATH = f"{CODEX_ROOT}/skills/run-on-gadi/"
+READ_ONLY_SKILL_PATHS = (
+    f"{CODEX_ROOT}/skills/run-on-gadi/",
+    f"{CODEX_ROOT}/skills/gadi-autoresearch/",
+)
 AUTHORIZED_PROJECTS = {"wa66", "ey69", "po67", "iv96"}
 
 
@@ -119,15 +122,28 @@ def path_policy_checks(text: str, errors: list[str], warnings: list[str]) -> Non
         if CODEX_ROOT in line and not line.lstrip().startswith("#")
     ]
     for idx, line in codex_lines:
-        remainder = line.replace(SKILL_ROOT_PATH, "")
+        remainder = line
+        for skill_path in READ_ONLY_SKILL_PATHS:
+            remainder = remainder.replace(skill_path, "")
         read_only_assignment = re.match(
             r"^\s*(?:export\s+)?(?:RUNNER|BUILDER|PACKER|SKILL_ROOT)\s*=",
             line,
         )
-        read_only_invocation = re.match(r"^\s*(?:bash|python3?|source)\s+", line)
+        read_only_invocation = re.match(r"^\s*(?:bash|(?:\S*/)?python3?|source)\s+", line)
+        autoresearch_root = f"{CODEX_ROOT}/skills/gadi-autoresearch/"
+        autoresearch_path = f"{autoresearch_root}scripts/campaign.py"
+        autoresearch_worker = re.match(
+            rf"^\s*(?:\S*/)?python3?\s+{re.escape(autoresearch_path)}\s+"
+            r"(?:worker-run|interactive-run|interactive-publish)\b",
+            line,
+        )
+        if autoresearch_root in line and read_only_invocation and not autoresearch_worker:
+            errors.append(
+                f"line {idx}: only compute-side gadi-autoresearch commands may run inside PBS"
+            )
         if CODEX_ROOT in remainder or not (read_only_assignment or read_only_invocation):
             errors.append(
-                f"line {idx}: only read-only run-on-gadi skill access is allowed under {CODEX_ROOT}"
+                f"line {idx}: only approved read-only skill access is allowed under {CODEX_ROOT}"
             )
 
     cache_names = (
@@ -224,9 +240,27 @@ def path_policy_checks(text: str, errors: list[str], warnings: list[str]) -> Non
         r"^\s*(?:wget|curl|git\s+clone|huggingface-cli\s+download|hf\s+download)\b",
         re.MULTILINE,
     )
+    persistent_mutation_pattern = re.compile(
+        r"^\s*(?:mkdir|touch|cp|mv|rm|rmdir|rsync|install|ln|tee|truncate)\b[^\n]*"
+        r"(?:/g/data/|/scratch/|/home/)|"
+        r"(?:>|>>)\s*(?:/g/data/|/scratch/|/home/)"
+    )
     for idx, line in enumerate(text.splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
+        if re.search(r"\b(?:qsub|qdel|persistent-sessions)\b", line):
+            errors.append(
+                f"line {idx}: PBS workloads cannot submit/cancel jobs or manage persistent sessions"
+            )
+        if re.search(r"\bcodex\s+exec\b", line):
+            errors.append(f"line {idx}: run Codex on the control host, not inside a PBS workload")
+        if "--dangerously-bypass-approvals-and-sandbox" in line:
+            errors.append(f"line {idx}: dangerous Codex approval bypass is forbidden")
+        if persistent_mutation_pattern.search(line):
+            errors.append(
+                f"line {idx}: direct persistent/shared-filesystem mutation is forbidden; "
+                "write in $PBS_JOBFS and publish through an audited helper"
+            )
         if install_pattern.search(line):
             errors.append(
                 f"line {idx}: do not install packages directly in a PBS workload; "
@@ -267,7 +301,11 @@ def lint(path: Path) -> tuple[list[str], list[str], dict[str, object]]:
             errors.append(f"missing required PBS directive: {required}")
     if directives.get("j", "").lower() not in {"oe", "eo"} and "e" not in directives:
         errors.append("set '#PBS -j oe' or provide an explicit '#PBS -e' path")
-    if "CHANGE_ME" in text:
+    if any(
+        "CHANGE_ME" in line
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#") or line.lstrip().startswith("#PBS")
+    ):
         errors.append("template placeholder CHANGE_ME remains")
     if "set -euo pipefail" not in text:
         warnings.append("add 'set -euo pipefail' after PBS directives")

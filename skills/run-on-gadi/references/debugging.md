@@ -5,7 +5,7 @@
 Classify every request before using PBS:
 
 1. **Static inspection**: read code and logs, run syntax checks and the PBS linter, and prepare commands. Do not request compute resources.
-2. **Interactive debug**: use a detached `tmux` session on a login node to hold one explicitly approved `qsub -I` connection. Perform compute, GPU, and jobfs work only after PBS provides a compute-node shell.
+2. **Interactive debug**: use a detached `tmux` session on a Gadi login node or NCI persistent-session control host to hold one explicitly approved `qsub -I` connection. Perform compute, GPU, and jobfs work only after PBS provides a compute-node shell.
 3. **Production batch**: submit a standalone PBS script only after the interactive or short batch smoke test passes. A debug request is never production-submission permission.
 
 ## Why tmux
@@ -14,14 +14,28 @@ Gadi currently provides `/bin/tmux` 2.7 and `/bin/screen` 4.06.02. Prefer `tmux`
 
 NCI's [Job Submission guide](https://opus.nci.org.au/spaces/Help/pages/236880320/Job%2BSubmission...) explicitly recommends interactive jobs for testing and debugging before running the full job. It also warns that login-node work exceeding roughly 30 minutes or 4 GiB can be terminated; tmux does not exempt a process from those limits.
 
-Start tmux on the login node **before** `qsub -I`. Do not start it on the allocated compute node and do not use `nohup qsub -I`.
+Start tmux on the control host **before** `qsub -I`. Prefer an NCI persistent session for multi-hour agent exploration so reconnecting does not depend on one login host. Do not start tmux on the allocated compute node and do not use `nohup qsub -I`.
 
-The default tmux socket is in the login node's local `/tmp`. This is inode-safe for persistent storage, but it has two consequences:
+The default tmux socket is in the control host's local `/tmp`. This is inode-safe for persistent storage, but it has two consequences:
 
-- Reattach on the same login host shown by `hostname -f`.
-- A login-node restart destroys the tmux server and may break the interactive connection.
+- Reattach on the same control host shown by `hostname -f`.
+- A control-host restart destroys the tmux server and may break the interactive connection. Persist compact state after each atomic debug step.
 
 Tmux does not extend PBS walltime and does not make an interactive job suitable for production.
+
+## Persistent Control Host
+
+For multi-hour agent exploration, prefer NCI's [Persistent Sessions service](https://opus.nci.org.au/spaces/Help/pages/241927941/Persistent+Sessions...). It is designed for lightweight workflow managers that submit and monitor PBS jobs. It is explicitly not a compute or download service, and NCI requires tools there to query PBS no more than about once every ten minutes.
+
+Preview session creation first:
+
+```bash
+bash /g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/persistent_session.sh \
+  --project CHANGE_ME \
+  --name arisctl
+```
+
+Only after approval, repeat with `--start`. Record the UUID and returned `*.ps.gadi.nci.org.au` hostname rather than parsing `persistent-sessions list`. Put tmux and the lightweight controller on that host; all CPU/GPU work remains in PBS.
 
 ## Preview and Start
 
@@ -34,15 +48,15 @@ bash /g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/debug_session.sh \
   --walltime 01:00:00
 ```
 
-The helper defaults to preview-only. It shows the login host, unique session name, current project report, exact `qsub` command, and estimated SU. It accepts `cpu`, `v100`, `a100`, and `h200` and refuses interactive walltimes over two hours.
+The helper defaults to preview-only. It shows the control host, unique session name, current project report, exact `qsub` command, and estimated SU. It accepts `cpu`, `v100`, `a100`, and `h200` and refuses interactive walltimes over four hours. Use `--persistent-control-host` only from an NCI persistent session when its internal hostname does not match the public `*.ps.gadi.nci.org.au` form.
 
-Use the least expensive GPU that reproduces the target behavior. Select H200 only when Hopper compatibility, H200 memory, or the production target actually requires it.
+Use the least expensive GPU that reproduces the target behavior. Select H200 only when Hopper compatibility, H200 memory, or the production target actually requires it. A reproducible unattended run should use batch even when it is shorter than four hours.
 
 Only after the user explicitly approves that displayed request, repeat it with `--start`. This creates a detached tmux session and submits `qsub -I`. Starting tmux alone is not submission approval.
 
-The helper starts a clean `bash --noprofile --norc` pane so stale HOME startup entries cannot redirect the login-side command into an expired `/jobfs/...` path. It does not edit HOME configuration.
+The helper starts a clean `bash --noprofile --norc` pane so stale HOME startup entries cannot redirect the control-side command into an expired `/jobfs/...` path. It does not edit HOME configuration. It may create a separate named tmux session while the controller itself is already running in tmux.
 
-Useful commands on the same login node:
+Useful commands on the same control host:
 
 ```bash
 tmux list-sessions

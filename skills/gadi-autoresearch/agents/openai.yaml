@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gadi Autoresearch"
+  short_description: "Autonomous research from broad idea to paper on Gadi"
+  default_prompt: "Use $gadi-autoresearch to turn this broad research idea into a bounded, resumable Gadi campaign and continue through validated experiments and paper writing."

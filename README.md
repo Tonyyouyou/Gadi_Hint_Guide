@@ -2,23 +2,30 @@
 
 ## Codex Skill (Current Workflow)
 
-The maintained, agent-facing guide is [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md). It combines current NCI guidance, a dated H200/A100/V100 queue snapshot, live allocation probes, PBS linting, file-safe environment/data tools, and reusable templates.
+The maintained agent workflows are:
+
+- [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md): Gadi storage, environments, data, queues, interactive debugging, PBS validation, submission, monitoring, and troubleshooting.
+- [`skills/gadi-autoresearch`](skills/gadi-autoresearch/SKILL.md): a bounded, resumable broad-idea-to-paper research campaign using persistent control, interactive exploration, batch experiments, evidence audits, and compact inode-safe state.
 
 For this account, it is installed as:
 
 ```text
 /g/data/wa66/Xiangyu/.codex/skills/run-on-gadi
   -> ../repos/Gadi_Hint_Guide/skills/run-on-gadi
+/g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch
+  -> ../repos/Gadi_Hint_Guide/skills/gadi-autoresearch
 ```
 
-Invoke it in Codex as `$run-on-gadi`. The non-negotiable storage policy is:
+Invoke them as `$run-on-gadi` and `$gadi-autoresearch`. The non-negotiable storage policy is:
 
 - `/g/data/wa66/Xiangyu/.codex` is only for Codex configuration, skills, and their source repositories. Never put workload data, models, environments, caches, checkpoints, logs, or results there.
+- Keep each small research Git workspace under `/g/data/wa66/Xiangyu` and outside `.codex`; do not use HOME for campaign source or artifacts.
 - Build expanded environments, downloads, caches, and extracted datasets only in `$PBS_JOBFS`.
 - Publish environments as single `.sqsh` files in `/g/data/wa66/Xiangyu/enviroment_cache`.
 - Publish packed datasets in `/g/data/wa66/Xiangyu/Data` and results in an existing/user-approved `Result*` directory.
 - Re-run the live preflight for `wa66`, `ey69`, `po67`, and `iv96` before choosing a charging project; quarterly KSU and inode usage are dynamic.
-- Debug through login-node `tmux` plus an explicitly approved `qsub -I`; production batch submission requires separate approval.
+- For multi-hour exploration, put tmux and the lightweight controller in an NCI persistent session while all computation remains inside PBS.
+- Interactive exploration is capped at four hours. Production/autonomous submission requires explicit side-effect approval or a recorded, validated `gadi-autoresearch` campaign envelope.
 
 The older manual notes below are retained as background. Hard-coded projects, mounts, resource values, and HOME-based environment steps in those notes must not override the skill or current NCI documentation.
 

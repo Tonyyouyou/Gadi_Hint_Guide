@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Rendered into /tmp and submitted by campaign.py; no persistent PBS file is created.
+#PBS -P __PROJECT__
+#PBS -q __QUEUE__
+#PBS -N __JOB_NAME__
+#PBS -l ncpus=__NCPUS__
+__NGPUS_DIRECTIVE__
+#PBS -l mem=__MEM_GB__GB
+#PBS -l jobfs=__JOBFS_GB__GB
+#PBS -l walltime=__WALLTIME__
+#PBS -l storage=gdata/wa66
+#PBS -l wd
+#PBS -j oe
+#PBS -o __LOG_PATH__
+
+set -euo pipefail
+
+export TMPDIR="$PBS_JOBFS/tmp"
+export XDG_CACHE_HOME="$PBS_JOBFS/cache/xdg"
+export HF_HOME="$PBS_JOBFS/cache/huggingface"
+export TORCH_HOME="$PBS_JOBFS/cache/torch"
+export PIP_CACHE_DIR="$PBS_JOBFS/cache/pip"
+export PYTHONDONTWRITEBYTECODE=1
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HF_HOME" "$TORCH_HOME" "$PIP_CACHE_DIR"
+
+module purge
+module load singularity
+
+__CONTROL_PYTHON__ __CAMPAIGN_CLI__ worker-run __CAMPAIGN_ROOT__ --id __EXPERIMENT_ID__
