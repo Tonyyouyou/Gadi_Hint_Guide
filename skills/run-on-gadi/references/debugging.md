@@ -25,7 +25,7 @@ Tmux does not extend PBS walltime and does not make an interactive job suitable 
 
 ## Persistent Control Host
 
-For multi-hour agent exploration, prefer NCI's [Persistent Sessions service](https://opus.nci.org.au/spaces/Help/pages/241927941/Persistent+Sessions...). It is designed for lightweight workflow managers that submit and monitor PBS jobs. It is explicitly not a compute or download service, and NCI requires tools there to query PBS no more than about once every ten minutes.
+For multi-hour agent exploration, prefer NCI's [Persistent Sessions service](https://opus.nci.org.au/display/Help/Persistent+Sessions). It is designed for lightweight workflow managers that submit and monitor PBS jobs. It is explicitly not a compute or download service, and NCI requires tools there to query PBS no more than about once every ten minutes.
 
 Preview session creation first:
 

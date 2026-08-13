@@ -4,7 +4,7 @@
 
 NCI Persistent Sessions are intended for low-CPU, low-memory workflow managers that submit and monitor PBS jobs:
 
-https://opus.nci.org.au/spaces/Help/pages/241927941/Persistent+Sessions...
+https://opus.nci.org.au/display/Help/Persistent+Sessions
 
 They are explicitly not compute, download, or preprocessing hosts. NCI also asks workflow managers to query PBS at most once every ten minutes.
 
