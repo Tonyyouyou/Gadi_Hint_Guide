@@ -155,6 +155,9 @@ class StartControllerTests(unittest.TestCase):
         self.assertIn("--noprofile", log)
         self.assertIn("PBS_JOBFS", log)
         self.assertIn("--poll-seconds", log)
+        self.assertIn("supervisor.py", log)
+        self.assertIn("HF_TOKEN", log)
+        self.assertIn("OVERLEAF_TOKEN", log)
 
     def test_start_persists_explicit_model_and_reasoning_effort(self) -> None:
         result = self.run_helper(

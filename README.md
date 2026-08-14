@@ -24,7 +24,7 @@ Invoke them as `$run-on-gadi` and `$gadi-autoresearch`. The non-negotiable stora
 - Publish environments as single `.sqsh` files in `/g/data/wa66/Xiangyu/enviroment_cache`.
 - Publish packed datasets in `/g/data/wa66/Xiangyu/Data` and results in an existing/user-approved `Result*` directory.
 - Re-run the live preflight for `wa66`, `ey69`, `po67`, and `iv96` before choosing a charging project; quarterly KSU and inode usage are dynamic.
-- For multi-hour exploration, put tmux and the lightweight controller in an NCI persistent session while all computation remains inside PBS.
+- For multi-hour exploration, put the campaign-specific tmux watchdog and lightweight controller in an NCI persistent session while all computation remains inside PBS.
 - Interactive exploration is capped at four hours. Production/autonomous submission requires explicit side-effect approval or a recorded, validated `gadi-autoresearch` campaign envelope.
 
 The older manual notes below are retained as background. Hard-coded projects, mounts, resource values, and HOME-based environment steps in those notes must not override the skill or current NCI documentation.

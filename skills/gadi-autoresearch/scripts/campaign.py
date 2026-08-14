@@ -96,9 +96,10 @@ NOVELTY_PROBE_MAX_SU = 1000.0
 NOVELTY_PROBE_MAX_WALLTIME_SECONDS = 4 * 3600
 NOVELTY_PROBE_MAX_GPUS_PER_JOB = 1
 NOVELTY_PROBE_MAX_PERSISTENT_ENTRIES = 32
-DISCOVERY_STORAGE_MAX_JOBS = 2
-DISCOVERY_STORAGE_MAX_SU = 500.0
-DISCOVERY_STORAGE_MAX_PERSISTENT_ENTRIES = 8
+DISCOVERY_STORAGE_MAX_JOBS = 6
+DISCOVERY_STORAGE_MAX_SU = 1500.0
+DISCOVERY_STORAGE_MAX_PERSISTENT_ENTRIES = 16
+DISCOVERY_STORAGE_MAX_ATTEMPTS_PER_STAGE = 3
 NOVELTY_PRIMARY_CLAIMS = {
     "new_mechanism",
     "new_combination",
@@ -1196,6 +1197,15 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
             "last_agent_at": None,
             "last_pbs_poll_at": None,
             "wake_at": None,
+            "lease": None,
+            "recovery": {
+                "category": None,
+                "attempts": 0,
+                "role": None,
+                "target_state": None,
+                "last_failure": None,
+                "thread_rotations": 0,
+            },
         },
         "artifacts": {},
         "experiments": {},
@@ -1433,6 +1443,18 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
         state["control"].setdefault("novelty_review_requested_at", None)
         state["control"].setdefault("novelty_arbitration_thread_id", None)
         state["control"].setdefault("novelty_arbitration_requested_at", None)
+        state["control"].setdefault("lease", None)
+        state["control"].setdefault(
+            "recovery",
+            {
+                "category": None,
+                "attempts": 0,
+                "role": None,
+                "target_state": None,
+                "last_failure": None,
+                "thread_rotations": 0,
+            },
+        )
         if state["status"] == "active" and state["control"]["state"] == "waiting_human":
             state["control"]["reason"] = (
                 "skill revision adopted; review migration requirements before explicit resume"
@@ -1686,6 +1708,126 @@ def validate_candidate_portfolio(state: dict[str, Any], path: Path) -> dict[str,
             f"{state['mission']['exploration_mode']} exploration requires at least {minimum} viable candidates"
         )
     return portfolio
+
+
+def pivot_to_backup(
+    state: dict[str, Any],
+    *,
+    reason: str,
+    candidate_id: str | None = None,
+) -> str | None:
+    """Atomically promote a ranked backup and invalidate candidate-bound artifacts."""
+    active_claim_jobs = [
+        experiment_id
+        for experiment_id, experiment in state["experiments"].items()
+        if experiment.get("mode") != "external"
+        and experiment.get("stage") not in {"sanity", "profile"}
+        and experiment_status(experiment) in JOB_ACTIVE
+    ]
+    if active_claim_jobs:
+        raise CampaignError(
+            "cannot pivot candidates while claim-bearing jobs are active: "
+            + ", ".join(active_claim_jobs)
+        )
+    portfolio_path = artifact_file(state, "candidate_portfolio")
+    portfolio = validate_candidate_portfolio(state, portfolio_path)
+    candidates = portfolio["candidates"]
+    backups = [candidate for candidate in candidates if candidate.get("status") == "backup"]
+    if candidate_id:
+        backups = [candidate for candidate in backups if candidate.get("id") == candidate_id]
+        if not backups:
+            raise CampaignError(f"candidate is not an available backup: {candidate_id}")
+    if not backups:
+        return None
+    target = backups[0]
+    previous_id = portfolio["active_candidate_id"]
+    for candidate in candidates:
+        if candidate.get("id") == previous_id:
+            candidate["status"] = "eliminated"
+        elif candidate.get("id") == target["id"]:
+            candidate["status"] = "active"
+    portfolio["active_candidate_id"] = target["id"]
+    portfolio["updated_at"] = utc_now()
+    portfolio.setdefault("pivot_history", []).append(
+        {
+            "at": utc_now(),
+            "from": previous_id,
+            "to": target["id"],
+            "reason": reason,
+        }
+    )
+
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            prefix=f".{portfolio_path.name}.",
+            suffix=".tmp",
+            dir=portfolio_path.parent,
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(portfolio, handle, indent=2, sort_keys=True, ensure_ascii=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_name = handle.name
+        temp_path = Path(temp_name)
+        validate_candidate_portfolio(state, temp_path)
+        os.replace(temp_path, portfolio_path)
+        temp_name = None
+    finally:
+        if temp_name:
+            Path(temp_name).unlink(missing_ok=True)
+
+    state["artifacts"]["candidate_portfolio"] = {
+        "path": str(portfolio_path),
+        "recorded_at": utc_now(),
+        "assurance": "provisional",
+        "size_bytes": portfolio_path.stat().st_size,
+        "mtime_ns": portfolio_path.stat().st_mtime_ns,
+        "sha256": sha256_file(portfolio_path),
+    }
+    invalidated = []
+    for name in (
+        "idea_report",
+        "novelty_audit",
+        "novelty_review",
+        "novelty_rebuttal",
+        "novelty_arbitration",
+        "research_contract",
+        "experiment_plan",
+        "experiment_ledger",
+        "results",
+        "experiment_audit",
+        "claim_audit",
+        "narrative_report",
+        "paper_source",
+        "paper_pdf",
+        "citation_audit",
+        "final_report",
+        "human_evaluation",
+    ):
+        if state["artifacts"].pop(name, None) is not None:
+            invalidated.append(name)
+    state.pop("research_track", None)
+    state["phase"] = "portfolio"
+    state["control"].update(
+        {
+            "state": "needs_agent",
+            "reason": f"automatically promoted backup candidate {target['id']}: {reason}",
+            "wake_at": None,
+        }
+    )
+    add_history(
+        state,
+        "candidate_auto_pivoted",
+        previous_candidate_id=previous_id,
+        candidate_id=target["id"],
+        reason=reason,
+        invalidated_artifacts=invalidated,
+    )
+    return str(target["id"])
 
 
 def validate_human_evaluation(state: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -2391,6 +2533,31 @@ def cmd_phase(args: argparse.Namespace) -> None:
         print(f"{previous} -> {args.phase}")
 
 
+def cmd_candidate_pivot(args: argparse.Namespace) -> None:
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        pin_missing_skill_reference(state)
+        require_author_control(state, "pivot the active candidate")
+        candidate_id = pivot_to_backup(
+            state,
+            reason=args.reason,
+            candidate_id=args.candidate_id,
+        )
+        if candidate_id is None:
+            raise CampaignError("candidate portfolio has no backup to promote; return to discovery")
+        print(
+            json.dumps(
+                {
+                    "active_candidate_id": candidate_id,
+                    "phase": state["phase"],
+                    "control": state["control"],
+                },
+                indent=2,
+            )
+        )
+
+
 def validate_artifact_path(state: dict[str, Any], path: Path) -> None:
     roots = policy_roots()
     if not path.exists():
@@ -2881,18 +3048,59 @@ def validate_discovery_storage_job(state: dict[str, Any], external: dict[str, An
         if experiment.get("mode") == "external"
         and experiment.get("clearance") in {None, "discovery_infrastructure"}
     ]
-    if any(item.get("stage") == external["stage"] for item in existing):
+    same_stage = [item for item in existing if item.get("stage") == external["stage"]]
+    completed = [item for item in same_stage if experiment_status(item) == "completed"]
+    if completed:
         raise CampaignError(
-            f"candidate-independent discovery permits only one {external['stage']} storage job"
+            f"candidate-independent discovery already published a {external['stage']} asset"
         )
+    active = [item for item in same_stage if experiment_status(item) in JOB_ACTIVE]
+    if active:
+        raise CampaignError(
+            f"a candidate-independent {external['stage']} storage attempt is still active"
+        )
+    contaminated = [
+        item["id"]
+        for item in same_stage
+        if Path(item["success_file"]).exists()
+    ]
+    if contaminated:
+        raise CampaignError(
+            "failed external attempts left a durable success path that requires inspection: "
+            + ", ".join(contaminated)
+        )
+    if len(same_stage) >= DISCOVERY_STORAGE_MAX_ATTEMPTS_PER_STAGE:
+        raise CampaignError(
+            f"candidate-independent {external['stage']} recovery-attempt limit is exhausted"
+        )
+    previous_scripts = {
+        attempt.get("pbs_script_sha256")
+        or hashlib.sha256(attempt.get("pbs_script", "").encode()).hexdigest()
+        for item in same_stage
+        for attempt in item.get("attempts", [])
+        if attempt.get("pbs_script")
+    }
+    if same_stage and external["pbs_script_sha256"] in previous_scripts:
+        raise CampaignError(
+            f"a failed {external['stage']} attempt may be retried only with a changed PBS script"
+        )
+    external["stage_attempt"] = len(same_stage) + 1
+    external["retry_of"] = same_stage[-1]["id"] if same_stage else None
     limits = discovery_storage_limits(state)
     if len(existing) + 1 > int(limits["max_jobs"]):
         raise CampaignError("candidate-independent discovery storage job limit is exhausted")
-    reserved_su = sum(float(item["max_su"]) for item in existing) + float(external["max_su"])
+    reserved_su = sum(
+        attempt_committed_su(attempt)
+        for item in existing
+        for attempt in item.get("attempts", [])
+    ) + float(external["max_su"])
     if reserved_su > float(limits["max_su"]) + 1e-9:
         raise CampaignError("candidate-independent discovery storage SU limit is exhausted")
-    entries = sum(int(item["expected_files"]) + 1 for item in existing)
-    entries += int(external["expected_files"]) + 1
+    entries = sum(
+        int(attempt.get("produced_entries") or 0)
+        for item in existing
+        for attempt in item.get("attempts", [])
+    ) + int(external["expected_files"])
     if entries > int(limits["max_persistent_entries"]):
         raise CampaignError("candidate-independent discovery storage entry limit is exhausted")
 
@@ -2995,6 +3203,7 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
         "expected_files": args.expected_files,
         "result_dir": str(success_path.parent),
         "success_file": str(success_path),
+        "pbs_script_sha256": hashlib.sha256(script.encode()).hexdigest(),
         "depends_on": [],
         "attempts": [],
     }
@@ -3026,6 +3235,7 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
         "max_su": external["max_su"],
         "actual_su": None,
         "pbs_script": script,
+        "pbs_script_sha256": external["pbs_script_sha256"],
     }
     external["attempts"].append(attempt)
     external["status"] = "submitting"
@@ -3558,11 +3768,20 @@ def cmd_refresh(args: argparse.Namespace) -> None:
             if produced_entries is not None:
                 attempt["produced_entries"] = produced_entries
             if validation_failure:
-                current["status"] = "paused"
                 current["control"].update({
-                    "state": "paused",
-                    "reason": f"job {job_id} reported success but durable output validation failed ({exit_status})",
+                    "state": "waiting_pbs",
+                    "reason": (
+                        f"job {job_id} reported success but durable output validation failed "
+                        f"({exit_status}); automatic recovery will inspect the failed attempt"
+                    ),
                 })
+                add_history(
+                    current,
+                    "durable_output_validation_failed",
+                    experiment_id=exp_id,
+                    job_id=job_id,
+                    exit_status=exit_status,
+                )
             if previous != status:
                 changes.append({"job_id": job_id, "previous": previous, "status": status})
                 add_history(current, "pbs_status_changed", experiment_id=exp_id, job_id=job_id, previous=previous, status=status)
@@ -4060,6 +4279,15 @@ def build_parser() -> argparse.ArgumentParser:
     phase.add_argument("phase", choices=PHASES)
     phase.add_argument("--reason", required=True)
     phase.set_defaults(func=cmd_phase)
+
+    pivot = sub.add_parser(
+        "candidate-pivot",
+        help="atomically eliminate the active candidate and promote a ranked backup",
+    )
+    pivot.add_argument("root")
+    pivot.add_argument("--candidate-id", help="specific backup to promote; default is portfolio order")
+    pivot.add_argument("--reason", required=True)
+    pivot.set_defaults(func=cmd_candidate_pivot)
 
     artifact = sub.add_parser("artifact", help="record one canonical evidence artifact and assurance class")
     artifact.add_argument("root")

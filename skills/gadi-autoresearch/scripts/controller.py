@@ -8,9 +8,12 @@ import contextlib
 import datetime as dt
 import fcntl
 import json
+import os
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -24,6 +27,12 @@ NOVELTY_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "novelt
 ADAPTER_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "adapter-system.md"
 WORKFLOW_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "research-workflow.md"
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+RETRY_DELAYS_SECONDS = (60, 300, 900, 3600)
+RUNNING_STATES = {
+    "agent_running": ("author", "needs_agent"),
+    "novelty_reviewer_running": ("novelty_reviewer", "needs_novelty_review"),
+    "novelty_arbiter_running": ("novelty_arbiter", "needs_novelty_arbitration"),
+}
 
 
 def rotate_log(path: Path) -> None:
@@ -70,6 +79,169 @@ def set_control(root: Path, **updates: Any) -> None:
         campaign.add_history(state, "controller_transition", control_updates=updates)
 
 
+def recovery_defaults() -> dict[str, Any]:
+    return {
+        "category": None,
+        "attempts": 0,
+        "role": None,
+        "target_state": None,
+        "last_failure": None,
+        "thread_rotations": 0,
+    }
+
+
+def ensure_control_schema(root: Path) -> None:
+    with campaign.locked_state(root) as state:
+        state["control"].setdefault("lease", None)
+        state["control"].setdefault("recovery", recovery_defaults())
+
+
+def clear_recovery(state: dict[str, Any]) -> None:
+    rotations = int(state["control"].get("recovery", {}).get("thread_rotations", 0))
+    state["control"]["recovery"] = {**recovery_defaults(), "thread_rotations": rotations}
+    state["control"]["lease"] = None
+
+
+def schedule_recovery(
+    root: Path,
+    *,
+    category: str,
+    role: str,
+    target_state: str,
+    reason: str,
+) -> None:
+    with campaign.locked_state(root) as state:
+        control = state["control"]
+        recovery = control.setdefault("recovery", recovery_defaults())
+        same_failure = recovery.get("category") == category and recovery.get("role") == role
+        attempts = int(recovery.get("attempts", 0)) + 1 if same_failure else 1
+        rotations = int(recovery.get("thread_rotations", 0))
+        if role == "author" and attempts == len(RETRY_DELAYS_SECONDS) + 1:
+            control["thread_id"] = None
+            rotations += 1
+        delay = RETRY_DELAYS_SECONDS[min(attempts - 1, len(RETRY_DELAYS_SECONDS) - 1)]
+        wake = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+        deadline = campaign.parse_time(state["approval"]["deadline"])
+        if wake > deadline:
+            wake = deadline
+        control["recovery"] = {
+            "category": category,
+            "attempts": attempts,
+            "role": role,
+            "target_state": target_state,
+            "last_failure": reason,
+            "thread_rotations": rotations,
+        }
+        control["lease"] = None
+        control.update(
+            {
+                "state": "waiting_time",
+                "reason": (
+                    f"automatic recovery {attempts} for {role}/{category}; "
+                    f"retry at {wake.isoformat().replace('+00:00', 'Z')}: {reason}"
+                ),
+                "wake_at": wake.isoformat().replace("+00:00", "Z"),
+            }
+        )
+        campaign.add_history(
+            state,
+            "controller_recovery_scheduled",
+            category=category,
+            role=role,
+            target_state=target_state,
+            attempt=attempts,
+            wake_at=control["wake_at"],
+            reason=reason,
+            thread_rotated=role == "author" and attempts == len(RETRY_DELAYS_SECONDS) + 1,
+        )
+
+
+def record_lease(root: Path, role: str, target_state: str, pid: int | None) -> None:
+    with campaign.locked_state(root) as state:
+        state["control"]["lease"] = {
+            "role": role,
+            "target_state": target_state,
+            "pid": pid,
+            "host": socket.gethostname(),
+            "started_at": campaign.utc_now(),
+        }
+
+
+def lease_process_alive(lease: dict[str, Any] | None) -> bool:
+    if not lease or lease.get("host") != socket.gethostname():
+        return False
+    try:
+        pid = int(lease.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ")
+    except (OSError, ValueError):
+        return False
+    return b"codex" in command
+
+
+def scientific_fallback(state: dict[str, Any], reason: str) -> str:
+    if state["mission"].get("fallback_policy") == "wait_human":
+        state["control"].update(
+            {
+                "state": "waiting_human",
+                "reason": f"immutable mission requests human review after scientific fallback: {reason}",
+                "wake_at": None,
+            }
+        )
+        return "waiting_human"
+    try:
+        candidate_id = campaign.pivot_to_backup(state, reason=reason)
+    except (campaign.CampaignError, OSError) as exc:
+        candidate_id = None
+        reason = f"{reason}; backup promotion was unavailable: {exc}"
+    if candidate_id:
+        return "portfolio"
+    invalidated = []
+    for name in (
+        "candidate_portfolio",
+        "idea_report",
+        "novelty_audit",
+        "novelty_review",
+        "novelty_rebuttal",
+        "novelty_arbitration",
+        "research_contract",
+        "experiment_plan",
+        "experiment_ledger",
+        "results",
+        "experiment_audit",
+        "claim_audit",
+        "narrative_report",
+        "paper_source",
+        "paper_pdf",
+        "citation_audit",
+        "final_report",
+        "human_evaluation",
+    ):
+        if state["artifacts"].pop(name, None) is not None:
+            invalidated.append(name)
+    state.pop("research_track", None)
+    state["phase"] = "discovery"
+    state["control"].update(
+        {
+            "state": "needs_agent",
+            "reason": f"all ranked backups are exhausted; regenerate the portfolio: {reason}",
+            "wake_at": None,
+        }
+    )
+    campaign.add_history(
+        state,
+        "scientific_fallback_to_discovery",
+        reason=reason,
+        invalidated_artifacts=invalidated,
+    )
+    return "discovery"
+
+
 def pause_campaign(root: Path, reason: str) -> None:
     with campaign.locked_state(root) as state:
         state["status"] = "paused"
@@ -98,7 +270,14 @@ def wake_due(root: Path, state: dict[str, Any]) -> bool:
         pause_campaign(root, "waiting_time has no wake_at")
         return False
     if campaign.parse_time(wake_at) <= dt.datetime.now(dt.timezone.utc):
-        set_control(root, state="needs_agent", reason=f"scheduled wake reached: {wake_at}", wake_at=None)
+        recovery = state["control"].get("recovery") or {}
+        target_state = recovery.get("target_state") or "needs_agent"
+        set_control(
+            root,
+            state=target_state,
+            reason=f"scheduled wake reached for {target_state}: {wake_at}",
+            wake_at=None,
+        )
         return True
     return False
 
@@ -111,10 +290,20 @@ def refresh_pbs(root: Path) -> None:
         text=True,
     )
     if result.returncode == 0:
+        with campaign.locked_state(root) as state:
+            recovery = state["control"].get("recovery") or {}
+            if recovery.get("category") == "pbs_refresh":
+                clear_recovery(state)
         return
     if "once per 600 seconds" in result.stderr:
         return
-    pause_campaign(root, f"PBS refresh failed: {result.stderr.strip()}")
+    schedule_recovery(
+        root,
+        category="pbs_refresh",
+        role="supervisor",
+        target_state="waiting_pbs",
+        reason=f"PBS refresh failed: {result.stderr.strip()}",
+    )
 
 
 def agent_prompt(root: Path, state: dict[str, Any]) -> str:
@@ -149,13 +338,13 @@ Before planning or claim-bearing experiments, read {NOVELTY_REFERENCE} and satis
 
 The cold reviewer has three current outcomes. clear_to_plan opens planning. exact_prior_reject requires a checked functionally equivalent prior and sends the candidate back to discovery/portfolio. conditional_probe means no exact prior was found but the paper-facing delta depends on an empirical interaction. In that case, remain in novelty_review and run only stage=novelty_probe experiments bound to the review. Current hard caps are:
 {novelty_probe_packet}
-After one to three completed probes, write the exact bound NOVELTY_REBUTTAL.json schema, register it as provisional, and hand off with state needs_novelty_arbitration. Never write NOVELTY_ARBITRATION.json yourself. A fresh third Codex thread decides clear_to_plan or exact_prior_reject. No pilot, main, ablation, paper-facing baseline, or full implementation work is allowed until final clearance. Preserve the observation when rejected. Never silently downgrade a requested method, architecture, objective, representation, system, data, evaluation, empirical, or theory contribution into an application, reproduction, or diagnostic paper.
+After one to three completed probes, write the exact bound NOVELTY_REBUTTAL.json schema, register it as provisional, and hand off with state needs_novelty_arbitration. Never write NOVELTY_ARBITRATION.json yourself. A fresh third Codex thread decides clear_to_plan or exact_prior_reject. No pilot, main, ablation, paper-facing baseline, or full implementation work is allowed until final clearance. Preserve the observation when rejected. Use campaign.py candidate-pivot to atomically promote a ranked backup; do not hand-edit several hash-bound artifacts. If every backup is exhausted, return to discovery and generate a new portfolio from the accumulated negative evidence. Never silently downgrade a requested method, architecture, objective, representation, system, data, evaluation, empirical, or theory contribution into an application, reproduction, or diagnostic paper.
 
-Before final novelty clearance, candidate-independent environment/data/model setup is permitted only through campaign.py external-submit within its small discovery-infrastructure cap. Environments must be assembled in PBS jobfs and published as one immutable .sqsh under /g/data/wa66/Xiangyu/enviroment_cache. Datasets must be downloaded/expanded in PBS jobfs and published as packed objects under /g/data/wa66/Xiangyu/Data. A public pretrained model may be acquired only when approval.allow_model_publish=true: use stage=model on copyq, pin an immutable source revision and license, download and validate in PBS jobfs, invoke the audited packer, and publish exactly one .tar.zst directly under /g/data/wa66/Xiangyu/Data/models. Register that archive as a data input, and expand it only into each compute job's PBS jobfs. Never persist expanded dependency trees, dataset trees, model repositories, model shards, or Hugging Face/package caches.
+Before final novelty clearance, candidate-independent environment/data/model setup is permitted only through campaign.py external-submit within its discovery-infrastructure recovery envelope. A failed same-stage attempt may be retried under a new immutable experiment ID only after changing the PBS script; the CLI records retry lineage and still charges every attempt against job/SU budgets. Environments must be assembled in PBS jobfs, smoke-tested for /bin/sh, Python, framework imports, and container execution, then published as one immutable .sqsh under /g/data/wa66/Xiangyu/enviroment_cache. Datasets must be downloaded/expanded in PBS jobfs and published as packed objects under /g/data/wa66/Xiangyu/Data. A public pretrained model may be acquired only when approval.allow_model_publish=true: use stage=model on copyq, pin an immutable source revision and license, download and validate in PBS jobfs, invoke the audited packer, and publish exactly one .tar.zst directly under /g/data/wa66/Xiangyu/Data/models. Register that archive as a data input, and expand it only into each compute job's PBS jobfs. Never persist expanded dependency trees, dataset trees, model repositories, model shards, or Hugging Face/package caches.
 
-If the selected route requires human evaluation, generate only a packed blinded study bundle, predeclare the protocol, and hand off to waiting_human. Never invent ratings, listeners, consent, demographics, or human-study results. Keep all expanded audio/media samples in PBS jobfs and publish only bounded archives, manifests, aggregate metrics, and a small declared demo subset.
+If a candidate requires unavailable human evaluation, block only that candidate: generate a packed blinded study bundle when the mission permits it, then promote an objective-evidence backup or return to discovery. Hand off to waiting_human only when the immutable mission explicitly requires human evidence and no acceptable autonomous branch remains. Never invent ratings, listeners, consent, demographics, or human-study results. Keep all expanded audio/media samples in PBS jobfs and publish only bounded archives, manifests, aggregate metrics, and a small declared demo subset.
 
-Work until one of these is true: PBS work must be awaited, explicit human input is required, a scheduled wake is appropriate, a safety/budget condition requires pause, or every completion artifact is verified and the campaign can be completed. Before this Codex turn exits, call campaign.py handoff with the correct state and concrete reason. A missing handoff pauses the controller rather than spinning another agent turn."""
+Recover technical failures autonomously: inspect compact logs, change the script or source commit before retrying deterministic failures, and use campaign.py cancel --execute only for a recorded campaign job when allow_auto_cancel is granted. Novelty uncertainty, an incompatible open model, a failed environment build, or a rejected candidate is not a reason for waiting_human. Work until PBS work must be awaited, a scheduled wake is appropriate, a true authorization/integrity boundary is reached, or every completion artifact is verified. Before this Codex turn exits, call campaign.py handoff with the correct state and concrete reason. A missing handoff is automatically retried by the supervisor."""
 
 
 def novelty_reviewer_prompt(root: Path, audit: dict[str, Any]) -> str:
@@ -177,7 +366,7 @@ Browse primary sources and inspect full papers plus official code when available
 
 Return exactly one current decision. Use exact_prior_reject only when a checked primary source implements the functionally equivalent mechanism; set exact_combination.functionally_equivalent=true and give concrete equivalence evidence. Use clear_to_plan when no exact prior was found and the technically non-obvious delta is adequately established, with no blocking overlap. Use conditional_probe when no exact prior was found, but whether the proposed interaction exceeds a naive A+B baseline is an empirical fact that a cheap distinguishing experiment can resolve. For conditional_probe, provide the schema's probe_plan with the question, naive-combination baseline, distinguishing outcome, and falsifier. Do not hard-reject merely because all primitives are individually known. A system, architecture, data, evaluation, empirical, or theory contribution may be valid when its mission-accepted claim and evidence standard are met; do not mislabel ordinary integration, metric choice, or scale-up as one.
 
-After fixing your independent source set and preliminary judgment, read the mission, route, candidate portfolio, and author artifacts, test the author's strongest rebuttal, and inspect additional cited sources where needed. Classify the actual contribution even when it is outside the mission; the controller will force the author back to discovery rather than accepting a silent downgrade. Write the exact schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_REVIEW.json. Bind it to the recorded audit hash, include at least three independently checked primary sources and a comparison for every primitive, then register it with assurance provisional using campaign.py. Hand off to needs_agent with a concrete verdict. If a reliable review cannot be completed, hand off to waiting_human instead of guessing. The controller will reject the review if this thread matches the author thread, the audit changed, the source workspace changes, the schema is incomplete, an old review is reused, or the required handoff is absent. A fresh same-family review is process-independent but remains scientifically provisional."""
+After fixing your independent source set and preliminary judgment, read the mission, route, candidate portfolio, and author artifacts, test the author's strongest rebuttal, and inspect additional cited sources where needed. Classify the actual contribution even when it is outside the mission; the controller will force the author back to discovery rather than accepting a silent downgrade. Write the exact schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_REVIEW.json. Bind it to the recorded audit hash, include at least three independently checked primary sources and a comparison for every primitive, then register it with assurance provisional using campaign.py. Hand off to needs_agent with a concrete verdict. If source access remains insufficient after bounded retries, do not guess and do not request a human novelty judgment: hand off to needs_agent with a reason beginning `inconclusive novelty review:` so the controller can promote a backup or return to discovery. The controller will reject the review if this thread matches the author thread, the audit changed, the source workspace changes, the schema is incomplete, an old review is reused, or the required handoff is absent. A fresh same-family review is process-independent but remains scientifically provisional."""
 
 
 def novelty_arbiter_prompt(root: Path, rebuttal: dict[str, Any]) -> str:
@@ -200,7 +389,7 @@ This is a fresh third Codex thread, distinct from both author and cold reviewer.
 
 Judge the paper-facing contribution, not whether each primitive exists independently. Check that the probe is valid, that the stated naive A+B baseline is faithful and competitive, that the distinguishing result supports a non-obvious interaction rather than tuning or branding, and that the evidence addresses every blocking reviewer objection. Transfer to another modality is not automatically novel or derivative; decide from the mechanism and evidence. Search additional primary sources when needed.
 
-Write the exact NOVELTY_ARBITRATION.json schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_ARBITRATION.json and register it as provisional with campaign.py. The only decisions are clear_to_plan and exact_prior_reject. clear_to_plan requires a mission-accepted primary contribution, no blocking issues, and no exact prior. exact_prior_reject requires a checked primary source that is functionally equivalent, with exact_prior.functionally_equivalent=true and concrete equivalence evidence. If the evidence is merely weak or the probe is invalid but no exact prior exists, do not invent a hard rejection: use waiting_human and explain what cannot be decided. Hand off to needs_agent after recording a valid arbitration. The controller rejects reused threads, changed inputs, workspace changes, incomplete schemas, and missing handoffs."""
+Write the exact NOVELTY_ARBITRATION.json schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_ARBITRATION.json and register it as provisional with campaign.py. The only decisions are clear_to_plan and exact_prior_reject. clear_to_plan requires a mission-accepted primary contribution, no blocking issues, and no exact prior. exact_prior_reject requires a checked primary source that is functionally equivalent, with exact_prior.functionally_equivalent=true and concrete equivalence evidence. If the evidence is weak or the probe is invalid but no exact prior exists, do not invent a hard rejection and do not request a human novelty judgment: hand off to needs_agent with a reason beginning `inconclusive novelty arbitration:` so the controller can promote a backup or return to discovery. Hand off to needs_agent after recording a valid arbitration. The controller rejects reused threads, changed inputs, workspace changes, incomplete schemas, and missing handoffs."""
 
 
 def codex_prefix(
@@ -216,6 +405,21 @@ def codex_prefix(
     return command
 
 
+def unattended_exec_prefix(
+    codex_bin: str,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> list[str]:
+    return [
+        *codex_prefix(codex_bin, model, reasoning_effort),
+        "exec",
+        "--sandbox",
+        "danger-full-access",
+        "--config",
+        'approval_policy="never"',
+    ]
+
+
 def codex_command(
     codex_bin: str,
     workspace: Path,
@@ -227,9 +431,7 @@ def codex_command(
     thread_id = state["control"].get("thread_id")
     prompt = agent_prompt(root, state)
     common = [
-        *codex_prefix(codex_bin, model, reasoning_effort),
-        "exec",
-        "--approve-for-me",
+        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
         "--add-dir",
         str(root),
     ]
@@ -247,9 +449,7 @@ def novelty_codex_command(
     reasoning_effort: str | None = None,
 ) -> list[str]:
     common = [
-        *codex_prefix(codex_bin, model, reasoning_effort),
-        "exec",
-        "--approve-for-me",
+        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
         "--add-dir",
         str(root),
     ]
@@ -265,13 +465,65 @@ def novelty_arbiter_codex_command(
     reasoning_effort: str | None = None,
 ) -> list[str]:
     common = [
-        *codex_prefix(codex_bin, model, reasoning_effort),
-        "exec",
-        "--approve-for-me",
+        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
         "--add-dir",
         str(root),
     ]
     return [*common, "--json", "-C", str(workspace), novelty_arbiter_prompt(root, rebuttal)]
+
+
+def run_codex_canary(
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    if not shutil.which(codex_bin):
+        raise campaign.CampaignError(f"Codex executable is unavailable: {codex_bin}")
+    marker = "gadi-autoresearch-controller-canary-v2"
+    with tempfile.TemporaryDirectory(prefix="gadi-autoresearch-canary-", dir="/tmp") as temp:
+        workspace = Path(temp)
+        init = subprocess.run(
+            ["git", "init", "-q", str(workspace)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if init.returncode != 0:
+            raise campaign.CampaignError(f"could not initialize Codex canary repository: {init.stderr.strip()}")
+        command = [
+            *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+            "--ephemeral",
+            "--json",
+            "-C",
+            str(workspace),
+            (
+                "Use the apply_patch tool to create canary.txt containing exactly "
+                f"{marker} followed by one newline. Do not create the file with shell redirection, "
+                "Python, sed, tee, or another file-writing command. Stop after verifying the file."
+            ),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise campaign.CampaignError("Codex control-host canary timed out") from exc
+        canary = workspace / "canary.txt"
+        if result.returncode != 0 or not canary.is_file() or canary.read_text(encoding="utf-8") != marker + "\n":
+            output = (result.stdout + "\n" + result.stderr)[-4000:].strip()
+            raise campaign.CampaignError(
+                f"Codex control-host canary failed with status {result.returncode}: {output}"
+            )
+    return {
+        "status": "pass",
+        "sandbox_mode": "danger-full-access",
+        "approval_policy": "never",
+        "host": socket.gethostname(),
+    }
 
 
 def run_agent(
@@ -290,15 +542,24 @@ def run_agent(
     try:
         campaign.live_preflight(state)
     except (campaign.CampaignError, OSError) as exc:
-        with campaign.locked_state(root) as current:
-            current["status"] = "paused"
-            current["control"].update({"state": "paused", "reason": f"agent preflight failed: {exc}"})
-            campaign.add_history(current, "controller_agent_preflight_failed", reason=str(exc))
+        schedule_recovery(
+            root,
+            category="agent_preflight",
+            role="author",
+            target_state="needs_agent",
+            reason=f"agent preflight failed: {exc}",
+        )
         return
     workspace = campaign.canonical(state["workspace"], strict=True)
     campaign.validate_workspace(workspace)
     if not shutil.which(codex_bin):
-        pause_campaign(root, f"Codex executable is unavailable: {codex_bin}")
+        schedule_recovery(
+            root,
+            category="codex_unavailable",
+            role="author",
+            target_state="needs_agent",
+            reason=f"Codex executable is unavailable: {codex_bin}",
+        )
         return
 
     with campaign.locked_state(root) as current:
@@ -306,7 +567,19 @@ def run_agent(
             return
         campaign.require_approved(current, "allow_auto_agent")
         campaign.require_current_skill(current)
-        current["control"].update({"state": "agent_running", "reason": "controller launched Codex"})
+        current["control"].update(
+            {
+                "state": "agent_running",
+                "reason": "controller launched Codex",
+                "lease": {
+                    "role": "author",
+                    "target_state": "needs_agent",
+                    "pid": None,
+                    "host": socket.gethostname(),
+                    "started_at": campaign.utc_now(),
+                },
+            }
+        )
         campaign.add_history(current, "controller_transition", control_updates={"state": "agent_running"})
     command = codex_command(codex_bin, workspace, current, root, model, reasoning_effort)
     log_path = root / "controller.log"
@@ -331,8 +604,15 @@ def run_agent(
                 bufsize=1,
             )
         except OSError as exc:
-            pause_campaign(root, f"failed to launch Codex: {exc}")
-            raise campaign.CampaignError(f"failed to launch Codex: {exc}") from exc
+            schedule_recovery(
+                root,
+                category="codex_launch",
+                role="author",
+                target_state="needs_agent",
+                reason=f"failed to launch Codex: {exc}",
+            )
+            return
+        record_lease(root, "author", "needs_agent", process.pid)
         assert process.stdout is not None
         for line in process.stdout:
             log.write(line)
@@ -355,24 +635,40 @@ def run_agent(
     finally:
         log.close()
 
+    recovery_request: tuple[str, str] | None = None
     with campaign.locked_state(root) as updated:
         if discovered_thread:
             updated["control"]["thread_id"] = discovered_thread
         updated["control"]["agent_turns"] += 1
         updated["control"]["last_agent_at"] = campaign.utc_now()
+        updated["control"]["lease"] = None
         if returncode != 0:
-            updated["status"] = "paused"
-            updated["control"].update({"state": "paused", "reason": f"Codex exited with status {returncode}; inspect controller.log"})
+            recovery_request = (
+                f"codex_exit_{returncode}",
+                f"Codex exited with status {returncode}; inspect controller.log",
+            )
         elif not updated["control"].get("thread_id"):
-            updated["status"] = "paused"
-            updated["control"].update({
-                "state": "paused",
-                "reason": "Codex returned no resumable thread ID; refusing to create unbounded session files",
-            })
+            recovery_request = (
+                "missing_thread_id",
+                "Codex returned no resumable thread ID",
+            )
         elif updated["control"]["state"] == "agent_running":
-            updated["status"] = "paused"
-            updated["control"].update({"state": "paused", "reason": "Codex exited without the required campaign handoff"})
+            recovery_request = (
+                "missing_handoff",
+                "Codex exited without the required campaign handoff",
+            )
+        else:
+            clear_recovery(updated)
         campaign.add_history(updated, "agent_turn_finished", returncode=returncode, thread_id=discovered_thread or updated["control"].get("thread_id"))
+    if recovery_request:
+        category, reason = recovery_request
+        schedule_recovery(
+            root,
+            category=category,
+            role="author",
+            target_state="needs_agent",
+            reason=reason,
+        )
 
 
 def run_novelty_reviewer(
@@ -393,14 +689,26 @@ def run_novelty_reviewer(
         audit = campaign.validate_novelty_audit(state, audit_path)
         audit_sha256 = campaign.sha256_file(audit_path)
     except (campaign.CampaignError, OSError) as exc:
-        pause_campaign(root, f"novelty reviewer input validation failed: {exc}")
+        schedule_recovery(
+            root,
+            category="novelty_review_input",
+            role="author",
+            target_state="needs_agent",
+            reason=f"novelty reviewer input validation failed: {exc}",
+        )
         return
     author_thread_id = control.get("thread_id")
     review_requested_at = control.get("novelty_review_requested_at")
     try:
         campaign.live_preflight(state)
     except (campaign.CampaignError, OSError) as exc:
-        pause_campaign(root, f"novelty reviewer preflight failed: {exc}")
+        schedule_recovery(
+            root,
+            category="novelty_review_preflight",
+            role="novelty_reviewer",
+            target_state="needs_novelty_review",
+            reason=f"novelty reviewer preflight failed: {exc}",
+        )
         return
     workspace = campaign.canonical(state["workspace"], strict=True)
     campaign.validate_workspace(workspace)
@@ -410,10 +718,22 @@ def run_novelty_reviewer(
             require_clean=True,
         )["commit"]
     except (campaign.CampaignError, OSError) as exc:
-        pause_campaign(root, f"novelty reviewer requires a clean source workspace: {exc}")
+        schedule_recovery(
+            root,
+            category="novelty_review_workspace",
+            role="author",
+            target_state="needs_agent",
+            reason=f"novelty reviewer requires a clean source workspace: {exc}",
+        )
         return
     if not shutil.which(codex_bin):
-        pause_campaign(root, f"Codex executable is unavailable: {codex_bin}")
+        schedule_recovery(
+            root,
+            category="codex_unavailable",
+            role="novelty_reviewer",
+            target_state="needs_novelty_review",
+            reason=f"Codex executable is unavailable: {codex_bin}",
+        )
         return
 
     with campaign.locked_state(root) as current:
@@ -425,18 +745,16 @@ def run_novelty_reviewer(
             current_audit = campaign.artifact_file(current, "novelty_audit")
             audit_unchanged = campaign.sha256_file(current_audit) == audit_sha256
         except (campaign.CampaignError, OSError) as exc:
-            current["status"] = "paused"
             current["control"].update({
-                "state": "paused",
-                "reason": f"novelty audit became invalid before reviewer launch: {exc}",
+                "state": "needs_agent",
+                "reason": f"repair novelty inputs before requesting a fresh review: {exc}",
             })
             campaign.add_history(current, "controller_novelty_review_input_changed", reason=str(exc))
             return
         if not audit_unchanged:
-            current["status"] = "paused"
             current["control"].update({
-                "state": "paused",
-                "reason": "novelty audit changed before the cold reviewer launch",
+                "state": "needs_agent",
+                "reason": "novelty audit changed before launch; validate it and request a fresh review",
             })
             campaign.add_history(current, "controller_novelty_review_input_changed", reason="hash changed")
             return
@@ -444,6 +762,13 @@ def run_novelty_reviewer(
         current["control"].update({
             "state": "novelty_reviewer_running",
             "reason": "controller launched fresh adversarial novelty reviewer",
+            "lease": {
+                "role": "novelty_reviewer",
+                "target_state": "needs_novelty_review",
+                "pid": None,
+                "host": socket.gethostname(),
+                "started_at": campaign.utc_now(),
+            },
         })
         campaign.add_history(
             current,
@@ -483,8 +808,15 @@ def run_novelty_reviewer(
                 bufsize=1,
             )
         except OSError as exc:
-            pause_campaign(root, f"failed to launch novelty reviewer: {exc}")
-            raise campaign.CampaignError(f"failed to launch novelty reviewer: {exc}") from exc
+            schedule_recovery(
+                root,
+                category="novelty_review_launch",
+                role="novelty_reviewer",
+                target_state="needs_novelty_review",
+                reason=f"failed to launch novelty reviewer: {exc}",
+            )
+            return
+        record_lease(root, "novelty_reviewer", "needs_novelty_review", process.pid)
         assert process.stdout is not None
         for line in process.stdout:
             log.write(line)
@@ -507,16 +839,25 @@ def run_novelty_reviewer(
     finally:
         log.close()
 
+    recovery_request: tuple[str, str] | None = None
     with campaign.locked_state(root) as updated:
         updated["control"]["agent_turns"] += 1
         updated["control"]["last_agent_at"] = campaign.utc_now()
+        updated["control"]["lease"] = None
         failure: str | None = None
+        inconclusive = False
         if returncode != 0:
             failure = f"novelty reviewer exited with status {returncode}; inspect controller.log"
         elif not discovered_thread:
             failure = "novelty reviewer returned no thread ID"
         elif discovered_thread == author_thread_id:
             failure = "novelty reviewer reused the author thread instead of a fresh context"
+        elif (
+            updated["control"]["state"] == "needs_agent"
+            and updated["control"].get("reason", "").startswith("inconclusive novelty review:")
+            and "novelty_review" not in updated["artifacts"]
+        ):
+            inconclusive = True
         else:
             try:
                 current_audit = campaign.artifact_file(updated, "novelty_audit")
@@ -546,8 +887,18 @@ def run_novelty_reviewer(
             failure = f"novelty reviewer used an invalid handoff: {updated['control']['state']}"
 
         if failure:
-            updated["status"] = "paused"
-            updated["control"].update({"state": "paused", "reason": failure})
+            recovery_request = ("novelty_review_turn", failure)
+        elif inconclusive:
+            fallback_phase = scientific_fallback(
+                updated,
+                updated["control"]["reason"],
+            )
+            campaign.add_history(
+                updated,
+                "novelty_review_inconclusive",
+                review_thread_id=discovered_thread,
+                fallback_phase=fallback_phase,
+            )
         else:
             review_record = updated["artifacts"]["novelty_review"]
             review_record.update({
@@ -563,31 +914,10 @@ def run_novelty_reviewer(
                     campaign.current_probe_binding(updated)
                 except campaign.CampaignError as exc:
                     updated.pop("research_track", None)
-                    if updated["mission"]["fallback_policy"] == "wait_human":
-                        fallback_phase = "novelty_review"
-                        updated["control"].update(
-                            {
-                                "state": "waiting_human",
-                                "reason": f"conditional novelty review requires a user decision: {exc}",
-                            }
-                        )
-                    else:
-                        portfolio = campaign.validate_candidate_portfolio(
-                            updated,
-                            campaign.artifact_file(updated, "candidate_portfolio"),
-                        )
-                        has_backup = any(
-                            candidate.get("status") == "backup"
-                            for candidate in portfolio["candidates"]
-                        )
-                        fallback_phase = "portfolio" if has_backup else "discovery"
-                        updated["phase"] = fallback_phase
-                        updated["control"].update(
-                            {
-                                "state": "needs_agent",
-                                "reason": f"conditional novelty review is outside the mission: {exc}; return to {fallback_phase}",
-                            }
-                        )
+                    fallback_phase = scientific_fallback(
+                        updated,
+                        f"conditional novelty review is outside the mission: {exc}",
+                    )
                     campaign.add_history(
                         updated,
                         "novelty_review_fallback",
@@ -620,34 +950,10 @@ def run_novelty_reviewer(
                     updated["research_track"] = campaign.novelty_resolution(updated)
                 except campaign.CampaignError as exc:
                     updated.pop("research_track", None)
-                    if updated["mission"]["fallback_policy"] == "wait_human":
-                        fallback_phase = "novelty_review"
-                        updated["control"].update(
-                            {
-                                "state": "waiting_human",
-                                "reason": f"cold novelty review requires a user decision: {exc}",
-                            }
-                        )
-                    else:
-                        portfolio = campaign.validate_candidate_portfolio(
-                            updated,
-                            campaign.artifact_file(updated, "candidate_portfolio"),
-                        )
-                        has_backup = any(
-                            candidate.get("status") == "backup"
-                            for candidate in portfolio["candidates"]
-                        )
-                        fallback_phase = "portfolio" if has_backup else "discovery"
-                        updated["phase"] = fallback_phase
-                        updated["control"].update(
-                            {
-                                "state": "needs_agent",
-                                "reason": (
-                                    f"cold novelty review rejected or reclassified the active candidate: {exc}; "
-                                    f"return to {fallback_phase}"
-                                ),
-                            }
-                        )
+                    fallback_phase = scientific_fallback(
+                        updated,
+                        f"cold novelty review rejected or reclassified the active candidate: {exc}",
+                    )
                     campaign.add_history(
                         updated,
                         "novelty_review_fallback",
@@ -664,6 +970,17 @@ def run_novelty_reviewer(
             author_thread_id=author_thread_id,
             validated=not failure,
             failure=failure,
+        )
+        if not failure:
+            clear_recovery(updated)
+    if recovery_request:
+        category, reason = recovery_request
+        schedule_recovery(
+            root,
+            category=category,
+            role="novelty_reviewer",
+            target_state="needs_novelty_review",
+            reason=reason,
         )
 
 
@@ -690,28 +1007,58 @@ def run_novelty_arbiter(
         review_sha256 = campaign.sha256_file(review_path)
         rebuttal_sha256 = campaign.sha256_file(rebuttal_path)
     except (campaign.CampaignError, OSError) as exc:
-        pause_campaign(root, f"novelty arbiter input validation failed: {exc}")
+        schedule_recovery(
+            root,
+            category="novelty_arbitration_input",
+            role="author",
+            target_state="needs_agent",
+            reason=f"novelty arbiter input validation failed: {exc}",
+        )
         return
     author_thread_id = control.get("thread_id")
     review_thread_id = state["artifacts"]["novelty_review"].get("review_thread_id")
     arbitration_requested_at = control.get("novelty_arbitration_requested_at")
     if not author_thread_id or not review_thread_id or author_thread_id == review_thread_id:
-        pause_campaign(root, "novelty arbitration requires distinct attested author and reviewer threads")
+        schedule_recovery(
+            root,
+            category="novelty_arbitration_threads",
+            role="author",
+            target_state="needs_agent",
+            reason="novelty arbitration requires distinct attested author and reviewer threads",
+        )
         return
     try:
         campaign.live_preflight(state)
     except (campaign.CampaignError, OSError) as exc:
-        pause_campaign(root, f"novelty arbiter preflight failed: {exc}")
+        schedule_recovery(
+            root,
+            category="novelty_arbitration_preflight",
+            role="novelty_arbiter",
+            target_state="needs_novelty_arbitration",
+            reason=f"novelty arbiter preflight failed: {exc}",
+        )
         return
     workspace = campaign.canonical(state["workspace"], strict=True)
     campaign.validate_workspace(workspace)
     try:
         arbiter_workspace_commit = campaign.git_workspace_info(workspace, require_clean=True)["commit"]
     except (campaign.CampaignError, OSError) as exc:
-        pause_campaign(root, f"novelty arbiter requires a clean source workspace: {exc}")
+        schedule_recovery(
+            root,
+            category="novelty_arbitration_workspace",
+            role="author",
+            target_state="needs_agent",
+            reason=f"novelty arbiter requires a clean source workspace: {exc}",
+        )
         return
     if not shutil.which(codex_bin):
-        pause_campaign(root, f"Codex executable is unavailable: {codex_bin}")
+        schedule_recovery(
+            root,
+            category="codex_unavailable",
+            role="novelty_arbiter",
+            target_state="needs_novelty_arbitration",
+            reason=f"Codex executable is unavailable: {codex_bin}",
+        )
         return
 
     with campaign.locked_state(root) as current:
@@ -729,21 +1076,19 @@ def run_novelty_arbiter(
                 and campaign.sha256_file(current_rebuttal) == rebuttal_sha256
             )
         except (campaign.CampaignError, OSError) as exc:
-            current["status"] = "paused"
             current["control"].update(
                 {
-                    "state": "paused",
-                    "reason": f"novelty arbitration inputs became invalid before launch: {exc}",
+                    "state": "needs_agent",
+                    "reason": f"repair novelty arbitration inputs before retrying: {exc}",
                 }
             )
             campaign.add_history(current, "controller_novelty_arbitration_input_changed", reason=str(exc))
             return
         if not inputs_unchanged:
-            current["status"] = "paused"
             current["control"].update(
                 {
-                    "state": "paused",
-                    "reason": "novelty arbitration inputs changed before the arbiter launch",
+                    "state": "needs_agent",
+                    "reason": "novelty arbitration inputs changed; validate and request a fresh arbitration",
                 }
             )
             campaign.add_history(current, "controller_novelty_arbitration_input_changed", reason="hash changed")
@@ -753,6 +1098,13 @@ def run_novelty_arbiter(
             {
                 "state": "novelty_arbiter_running",
                 "reason": "controller launched fresh independent novelty arbiter",
+                "lease": {
+                    "role": "novelty_arbiter",
+                    "target_state": "needs_novelty_arbitration",
+                    "pid": None,
+                    "host": socket.gethostname(),
+                    "started_at": campaign.utc_now(),
+                },
             }
         )
         campaign.add_history(
@@ -796,8 +1148,15 @@ def run_novelty_arbiter(
                 bufsize=1,
             )
         except OSError as exc:
-            pause_campaign(root, f"failed to launch novelty arbiter: {exc}")
-            raise campaign.CampaignError(f"failed to launch novelty arbiter: {exc}") from exc
+            schedule_recovery(
+                root,
+                category="novelty_arbitration_launch",
+                role="novelty_arbiter",
+                target_state="needs_novelty_arbitration",
+                reason=f"failed to launch novelty arbiter: {exc}",
+            )
+            return
+        record_lease(root, "novelty_arbiter", "needs_novelty_arbitration", process.pid)
         assert process.stdout is not None
         for line in process.stdout:
             log.write(line)
@@ -820,12 +1179,15 @@ def run_novelty_arbiter(
     finally:
         log.close()
 
+    recovery_request: tuple[str, str] | None = None
     with campaign.locked_state(root) as updated:
         updated["control"]["agent_turns"] += 1
         updated["control"]["last_agent_at"] = campaign.utc_now()
+        updated["control"]["lease"] = None
         failure: str | None = None
-        deferred_to_human = (
-            updated["control"]["state"] == "waiting_human"
+        inconclusive = (
+            updated["control"]["state"] == "needs_agent"
+            and updated["control"].get("reason", "").startswith("inconclusive novelty arbitration:")
             and "novelty_arbitration" not in updated["artifacts"]
         )
         if returncode != 0:
@@ -844,7 +1206,7 @@ def run_novelty_arbiter(
                     or campaign.sha256_file(current_rebuttal) != rebuttal_sha256
                 ):
                     raise campaign.CampaignError("novelty arbitration inputs changed during arbitration")
-                if not deferred_to_human:
+                if not inconclusive:
                     arbitration_path = campaign.artifact_file(updated, "novelty_arbitration")
                     campaign.validate_novelty_arbitration(updated, arbitration_path)
                     arbitration_record = updated["artifacts"]["novelty_arbitration"]
@@ -865,15 +1227,16 @@ def run_novelty_arbiter(
             failure = f"novelty arbiter used an invalid handoff: {updated['control']['state']}"
 
         if failure:
-            updated["status"] = "paused"
-            updated["control"].update({"state": "paused", "reason": failure})
-        elif deferred_to_human:
+            recovery_request = ("novelty_arbitration_turn", failure)
+        elif inconclusive:
             updated["control"]["novelty_arbitration_thread_id"] = discovered_thread
+            fallback_phase = scientific_fallback(updated, updated["control"]["reason"])
             campaign.add_history(
                 updated,
-                "novelty_arbitration_deferred_to_human",
+                "novelty_arbitration_inconclusive",
                 arbiter_thread_id=discovered_thread,
                 reason=updated["control"].get("reason"),
+                fallback_phase=fallback_phase,
             )
         else:
             arbitration_record = updated["artifacts"]["novelty_arbitration"]
@@ -903,30 +1266,10 @@ def run_novelty_arbiter(
                 )
             except campaign.CampaignError as exc:
                 updated.pop("research_track", None)
-                if updated["mission"]["fallback_policy"] == "wait_human":
-                    fallback_phase = "novelty_review"
-                    updated["control"].update(
-                        {
-                            "state": "waiting_human",
-                            "reason": f"novelty arbitration requires a user decision: {exc}",
-                        }
-                    )
-                else:
-                    portfolio = campaign.validate_candidate_portfolio(
-                        updated,
-                        campaign.artifact_file(updated, "candidate_portfolio"),
-                    )
-                    has_backup = any(
-                        candidate.get("status") == "backup" for candidate in portfolio["candidates"]
-                    )
-                    fallback_phase = "portfolio" if has_backup else "discovery"
-                    updated["phase"] = fallback_phase
-                    updated["control"].update(
-                        {
-                            "state": "needs_agent",
-                            "reason": f"novelty arbitration rejected the candidate: {exc}; return to {fallback_phase}",
-                        }
-                    )
+                fallback_phase = scientific_fallback(
+                    updated,
+                    f"novelty arbitration rejected the candidate: {exc}",
+                )
                 campaign.add_history(
                     updated,
                     "novelty_arbitration_fallback",
@@ -942,6 +1285,17 @@ def run_novelty_arbiter(
             review_thread_id=review_thread_id,
             validated=not failure,
             failure=failure,
+        )
+        if not failure:
+            clear_recovery(updated)
+    if recovery_request:
+        category, reason = recovery_request
+        schedule_recovery(
+            root,
+            category=category,
+            role="novelty_arbiter",
+            target_state="needs_novelty_arbitration",
+            reason=reason,
         )
 
 
@@ -968,6 +1322,7 @@ def tick(
     model: str | None = None,
     reasoning_effort: str | None = None,
 ) -> bool:
+    ensure_control_schema(root)
     state = campaign.load_state(root)
     if state["status"] != "active":
         return False
@@ -978,21 +1333,18 @@ def tick(
         pause_campaign(root, "campaign approval deadline expired")
         return False
     control = state["control"]["state"]
-    if control in {"agent_running", "novelty_reviewer_running", "novelty_arbiter_running"}:
-        stale_reasons = {
-            "agent_running": "stale agent_running state; inspect the control host before resuming to avoid duplicate agents",
-            "novelty_reviewer_running": "stale novelty_reviewer_running state; inspect the control host before resuming to avoid duplicate reviewers",
-            "novelty_arbiter_running": "stale novelty_arbiter_running state; inspect the control host before resuming to avoid duplicate arbiters",
-        }
-        duplicate_reason = stale_reasons[control]
-        with campaign.locked_state(root) as current:
-            current["status"] = "paused"
-            current["control"].update({
-                "state": "paused",
-                "reason": duplicate_reason,
-            })
-            campaign.add_history(current, "controller_paused_stale_process", stale_state=control)
-        return False
+    if control in RUNNING_STATES:
+        role, target_state = RUNNING_STATES[control]
+        if lease_process_alive(state["control"].get("lease")):
+            return True
+        schedule_recovery(
+            root,
+            category=f"stale_{role}",
+            role=role,
+            target_state=target_state,
+            reason=f"{control} lease has no live matching Codex process",
+        )
+        return True
     if control == "waiting_time":
         wake_due(root, state)
         state = campaign.load_state(root)
@@ -1020,16 +1372,25 @@ def main(argv: list[str] | None = None) -> int:
         choices=REASONING_EFFORTS,
         help="explicit Codex reasoning effort for every author, reviewer, and arbiter turn",
     )
-    parser.add_argument("--poll-seconds", type=int, default=600)
+    parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--start", action="store_true", help="perform controller actions; preview is default")
     parser.add_argument("--loop", action="store_true", help="keep watching until the campaign pauses or completes")
+    parser.add_argument("--canary", action="store_true", help="run one ephemeral real Codex apply_patch canary")
     args = parser.parse_args(argv)
     try:
         root = campaign.canonical(args.root, strict=True)
         state = campaign.load_state(root)
         campaign.require_approved(state, require_active=False, allow_expired=True)
-        if args.poll_seconds < 600:
-            raise campaign.CampaignError("poll-seconds must be at least 600")
+        if args.poll_seconds < 60:
+            raise campaign.CampaignError("poll-seconds must be at least 60")
+        if args.canary:
+            print(
+                json.dumps(
+                    run_codex_canary(args.codex_bin, args.model, args.reasoning_effort),
+                    indent=2,
+                )
+            )
+            return 0
         expired = campaign.parse_time(state["approval"]["deadline"]) <= dt.datetime.now(dt.timezone.utc)
         if expired:
             if args.start and state["status"] == "active":
@@ -1061,7 +1422,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.loop or not active:
                     break
                 state = campaign.load_state(root)
-                if state["control"]["state"] in {"waiting_human", "paused", "complete"}:
+                if state["control"]["state"] in {"paused", "complete"}:
                     break
                 time.sleep(args.poll_seconds)
     except (campaign.CampaignError, OSError) as exc:

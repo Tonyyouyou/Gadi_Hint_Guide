@@ -29,6 +29,7 @@ Use `$run-on-gadi` as the infrastructure authority. This skill owns the research
 SKILL=/g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch
 CAMPAIGN="$SKILL/scripts/campaign.py"
 CONTROLLER="$SKILL/scripts/controller.py"
+SUPERVISOR="$SKILL/scripts/supervisor.py"
 STARTER="$SKILL/scripts/start_controller.sh"
 ADAPTERS="$SKILL/scripts/adapter_registry.py"
 GADI=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi
@@ -160,7 +161,7 @@ Every experiment must declare:
 - a deterministic success file such as `metrics.json`
 - completed dependencies
 
-`discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Before final clearance, candidate-independent input preparation is limited to two total environment/data/model jobs, 500 SU total, and eight persistent entries. It requires `allow_storage_publish`; model acquisition additionally requires the separately recorded `allow_model_publish`. Use the audited jobfs helper and publish only one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, packed data under `/g/data/wa66/Xiangyu/Data`, or one provenance-recorded public model archive under `/g/data/wa66/Xiangyu/Data/models`. A `conditional_probe` review opens only `novelty_probe`: at most three attempts, 1,000 SU total (dynamically reduced for smaller campaigns), one GPU and four hours per job, and 32 persistent entries. `baseline`, `audit`, and `paper` require final resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted directly or by attested arbitration; both registration and submission recheck every hash-bound gate.
+`discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Before final clearance, candidate-independent input preparation is limited to six total environment/data/model attempts, 1,500 SU total, and 16 persistent entries, dynamically reduced by the campaign envelope. Each asset type permits at most three attempts. A failed attempt may use a new immutable experiment ID only after its PBS script changes; every failed attempt remains charged to the job, SU, and file budgets, and retry lineage is recorded. Input preparation requires `allow_storage_publish`; model acquisition additionally requires the separately recorded `allow_model_publish`. Use the audited jobfs helper, smoke-test the shell, Python/framework imports, and container execution, then publish only one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, packed data under `/g/data/wa66/Xiangyu/Data`, or one provenance-recorded public model archive under `/g/data/wa66/Xiangyu/Data/models`. A `conditional_probe` review opens only `novelty_probe`: at most three attempts, 1,000 SU total (dynamically reduced for smaller campaigns), one GPU and four hours per job, and 32 persistent entries. `baseline`, `audit`, and `paper` require final resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted directly or by attested arbitration; both registration and submission recheck every hash-bound gate.
 
 Use `{RESULT_DIR}`, `{PBS_JOBFS}`, `{WORKSPACE}`, and `{DATA_ROOT}` placeholders in command arguments. The worker substitutes them without shell evaluation. `{RESULT_DIR}` is attempt-local jobfs staging during execution, not a direct gdata write path; compact output is validated and atomically published only after success.
 
@@ -197,7 +198,7 @@ The controller applies these settings to the resumable author and every fresh no
 and arbiter thread. Record the exact launcher under the campaign root so a persistent-session
 restart cannot silently fall back to different defaults.
 
-Run the second command only after connecting to the persistent host. The helper uses a clean no-profile tmux command so stale HOME startup references cannot leak into the controller. For an attended three-to-four-hour exploration, a foreground Codex `/goal` may drive the same campaign directly and use the interactive pane; still persist every experiment and handoff through `campaign.py`. Use the event-driven controller for queued or overnight work so Codex is invoked only when a decision is needed.
+Run the second command only after connecting to the persistent host. The helper first executes a real ephemeral Codex `apply_patch` canary, then starts a watchdog around the controller in a clean no-profile tmux command. This cluster cannot create the Linux user namespaces required by Codex's workspace sandbox, so unattended turns explicitly use `sandbox=danger-full-access` with `approval_policy=never`; the approved campaign contract, CLI gates, clean control-host environment, bounded state, and real canary are therefore mandatory. Do not launch the raw controller outside the starter. For an attended three-to-four-hour exploration, a foreground Codex `/goal` may drive the same campaign directly and use the interactive pane; still persist every experiment and handoff through `campaign.py`. Use the event-driven controller for queued or overnight work so Codex is invoked only when a decision is needed.
 
 The first command previews. The second is permitted only after the campaign grants `allow_auto_agent` and a live pilot verifies Codex authentication/network access in the persistent session. The controller:
 
@@ -206,10 +207,11 @@ The first command previews. The second is permitted only after the campaign gran
 - invokes or resumes one `codex exec` turn only when action is needed
 - launches `needs_novelty_review` in a new non-resumed adversarial thread and attests that its thread ID differs from the author thread
 - preserves `conditional_probe` in `novelty_review`, enforces its job/SU/GPU/time/file caps, and launches `needs_novelty_arbitration` in a third non-resumed thread distinct from author and reviewer
-- returns rejected or mission-incompatible candidates to `portfolio` or `discovery` instead of silently changing the paper type
-- pauses if Codex exits without an explicit handoff
+- atomically promotes the next ranked backup after rejection, or returns to `discovery` when the portfolio is exhausted, without silently changing the paper type
+- retries Codex exits, missing handoffs, stale leases, transient preflight failures, and PBS refresh failures with bounded backoff; a repeatedly broken author thread is rotated from durable campaign state
 - stores one bounded rotating log under the campaign root
-- resumes from `campaign.json` after controller or persistent-session failure
+- uses a watchdog to restart an unexpectedly exited controller while the campaign remains active
+- resumes from `campaign.json` after controller or persistent-session failure; tmux text is not research state
 
 Read [references/persistent-control.md](references/persistent-control.md) before starting it. Do not parse `persistent-sessions list` output in automation.
 
@@ -217,7 +219,7 @@ Each campaign pins the skill repository commit and skill-tree hash. A changed in
 
 ## Stop, Pause, and Handoff
 
-Stop generating new work when any approved limit is reached, inode headroom becomes unsafe, allocation changes invalidate the plan, the deadline passes, repeated failures question the method/environment, evaluation integrity is uncertain, or a `STOP`/pause request is recorded.
+Stop generating new work when an approved limit is reached, inode headroom becomes unsafe, the deadline passes, the pinned skill or artifact lineage fails integrity checks, evaluation would require fabricated evidence, or a `STOP`/pause request is recorded. Technical failures use automatic diagnosis and bounded-backoff retries. Scientific failure eliminates or revises a candidate, promotes a ranked backup, or returns to discovery; it is not by itself a controller stop.
 
 Before every Codex turn exits, write exactly one control handoff:
 
@@ -227,7 +229,7 @@ Before every Codex turn exits, write exactly one control handoff:
   --reason "jobs 123 and 124 must finish before analysis"
 ```
 
-Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `needs_novelty_arbitration` only after a conditional review, completed bound probes, and a registered `NOVELTY_REBUTTAL.json`; the author must never write the arbitration. Use `waiting_human` for a real scientific/budget decision, `waiting_time` with `--wake-at`, `paused` for a safety problem, and `complete` only after the completion audit passes.
+Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `needs_novelty_arbitration` only after a conditional review, completed bound probes, and a registered `NOVELTY_REBUTTAL.json`; the author must never write the arbitration. Use `waiting_human` only when the immutable mission requires external human evidence or authorization and no autonomous branch remains, `waiting_time` with `--wake-at` for scheduled work or automatic recovery, `paused` for a hard safety/integrity boundary, and `complete` only after the completion audit passes.
 
 ## Completion Standard
 

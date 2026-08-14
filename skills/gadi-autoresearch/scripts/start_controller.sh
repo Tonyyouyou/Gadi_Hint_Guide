@@ -6,8 +6,9 @@ usage() {
 Usage:
   start_controller.sh --root CAMPAIGN_ROOT --session NAME [options]
 
-Preview is the default. --start launches the event-driven controller in one
-detached tmux session on an NCI persistent-session control host.
+Preview is the default. --start runs a real ephemeral Codex filesystem canary,
+then launches a restartable controller supervisor in one detached tmux session
+on an NCI persistent-session control host.
 
 Options:
   --codex-bin PATH          Codex executable (default: command -v codex)
@@ -56,6 +57,8 @@ done
 
 CONTROLLER=/g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch/scripts/controller.py
 [[ -f "$CONTROLLER" ]] || die "installed controller not found: $CONTROLLER"
+SUPERVISOR=/g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch/scripts/supervisor.py
+[[ -f "$SUPERVISOR" ]] || die "installed supervisor not found: $SUPERVISOR"
 PYTHON=/home/561/xz4320/miniconda3/bin/python3
 [[ -x "$PYTHON" ]] || die "modern control-plane Python is unavailable: $PYTHON"
 if [[ -z "$CODEX_BIN" ]]; then
@@ -92,7 +95,7 @@ CONTROLLER_ARGS=("$ROOT" --codex-bin "$CODEX_BIN")
 [[ -z "$MODEL" ]] || CONTROLLER_ARGS+=(--model "$MODEL")
 [[ -z "$REASONING_EFFORT" ]] || CONTROLLER_ARGS+=(--reasoning-effort "$REASONING_EFFORT")
 
-COMMAND=(
+CLEAN_ENV=(
   env
   -u PBS_JOBID -u PBS_JOBFS -u TMPDIR
   -u CONDA_PREFIX -u VIRTUAL_ENV -u PYTHONPATH
@@ -100,10 +103,17 @@ COMMAND=(
   -u HF_HOME -u HF_DATASETS_CACHE -u HUGGINGFACE_HUB_CACHE
   -u TRANSFORMERS_CACHE -u TORCH_HOME -u PIP_CACHE_DIR
   -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME
+  -u HF_TOKEN -u HUGGING_FACE_HUB_TOKEN -u OVERLEAF_TOKEN
   PYTHONDONTWRITEBYTECODE=1
-  "$PYTHON" "$CONTROLLER" "${CONTROLLER_ARGS[@]}"
-  --start --loop --poll-seconds 600
 )
+COMMAND=(
+  "${CLEAN_ENV[@]}"
+  "$PYTHON" "$SUPERVISOR" "$ROOT"
+  --controller "$CONTROLLER" --python "$PYTHON" --codex-bin "$CODEX_BIN"
+  --poll-seconds 60
+)
+[[ -z "$MODEL" ]] || COMMAND+=(--model "$MODEL")
+[[ -z "$REASONING_EFFORT" ]] || COMMAND+=(--reasoning-effort "$REASONING_EFFORT")
 printf -v DISPLAY '%q ' "${COMMAND[@]}"
 DISPLAY=${DISPLAY% }
 printf -v TMUX_COMMAND '%q ' /bin/bash --noprofile --norc -c "$DISPLAY"
@@ -129,6 +139,10 @@ fi
 command -v tmux >/dev/null 2>&1 || die "tmux is unavailable"
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   die "tmux session already exists: $SESSION"
+fi
+if [[ "${GADI_AUTORESEARCH_TESTING:-}" != 1 ]]; then
+  echo "Running control-host Codex apply_patch canary..."
+  "${CLEAN_ENV[@]}" "$PYTHON" "$CONTROLLER" "${CONTROLLER_ARGS[@]}" --canary
 fi
 tmux new-session -d -s "$SESSION" -n controller "$TMUX_COMMAND"
 tmux set-window-option -t "$SESSION:0" remain-on-exit on

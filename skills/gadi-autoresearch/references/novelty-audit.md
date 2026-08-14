@@ -182,7 +182,8 @@ Register and request cold review:
 The author thread must never create or register `NOVELTY_REVIEW.json`.
 Commit deliberate source changes and leave the research workspace clean before handoff. The
 controller verifies the same clean source commit before and after review; any reviewer edit or
-commit invalidates the verdict and pauses the campaign. A new review request also invalidates
+commit invalidates the verdict and schedules a fresh bounded-backoff review or returns the author
+to repair the workspace. A new review request also invalidates
 the previous review record, so the fresh thread must register a new artifact.
 
 ## Cold Reviewer Artifact
@@ -411,8 +412,10 @@ rebuttal and arbitration hashes.
 
 `discovery`, `sanity`, and `profile` experiments may run before the gate because they generate
 bounded observations or test infrastructure/feasibility with existing frozen inputs. Before final
-clearance, at most two candidate-independent storage jobs may publish environment, data, or model
-inputs, totaling at most 500 SU and eight persistent entries. They still require explicit
+clearance, at most six candidate-independent storage attempts may publish environment, data, or model
+inputs, totaling at most 1,500 SU and 16 persistent entries, dynamically reduced by the campaign.
+Each asset type permits at most three attempts, and a failed attempt can be retried only under a new
+ID with a changed PBS script while retaining its charged cost and lineage. They still require explicit
 `allow_storage_publish`, the audited jobfs builder/packer, an immutable `.sqsh` under
 `/g/data/wa66/Xiangyu/enviroment_cache`, or packed data under `/g/data/wa66/Xiangyu/Data`.
 Publishing a public pretrained model additionally requires `allow_model_publish`, an immutable

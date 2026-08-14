@@ -1654,6 +1654,114 @@ class CampaignTests(unittest.TestCase):
         )
         self.assertEqual(state["experiments"]["build-env-v2"]["status"], "queued")
 
+    def test_failed_external_environment_job_requires_changed_script_for_retry(self) -> None:
+        self.init()
+        self.approve(allow_storage=True)
+        pbs = self.workspace / "build-env-retry.pbs"
+        first_success = self.env_root / "retry-env-v1.sqsh"
+        second_success = self.env_root / "retry-env-v2.sqsh"
+        pbs.write_text(
+            "#!/usr/bin/env bash\n"
+            "#PBS -P wa66\n#PBS -q copyq\n#PBS -N env-v1\n"
+            "#PBS -l ncpus=1\n#PBS -l mem=8GB\n#PBS -l jobfs=100GB\n"
+            "#PBS -l walltime=01:00:00\n#PBS -l storage=gdata/wa66\n#PBS -l wd\n"
+            f"#PBS -j oe\n#PBS -o {self.root}/build-env-v1.log\n"
+            "set -euo pipefail\nexport TMPDIR=\"$PBS_JOBFS/tmp\"\nmkdir -p \"$TMPDIR\"\n"
+            "BUILDER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/build_conda_sqsh.sh\n"
+            "bash \"$BUILDER\" --help\n",
+            encoding="utf-8",
+        )
+        lint_report = {
+            "errors": [],
+            "warnings": [],
+            "summary": {
+                "project": "wa66",
+                "queue": "copyq",
+                "ncpus": 1,
+                "ngpus": 0,
+                "mem_gb": 8,
+                "jobfs_gb": 100,
+                "walltime_hours": 1.0,
+            },
+        }
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, _, error = self.call(
+                "external-submit",
+                str(self.root),
+                "--id",
+                "build-env-retry-v1",
+                "--stage",
+                "environment",
+                "--pbs",
+                str(pbs),
+                "--success-path",
+                str(first_success),
+                "--expected-files",
+                "1",
+                "--execute",
+            )
+        self.assertEqual(code, 0, error)
+        with CAMPAIGN.locked_state(self.root) as state:
+            experiment = state["experiments"]["build-env-retry-v1"]
+            experiment["status"] = "failed"
+            experiment["attempts"][-1].update(
+                {
+                    "status": "failed",
+                    "finished_at": CAMPAIGN.utc_now(),
+                    "exit_status": 1,
+                    "actual_su": 0.25,
+                }
+            )
+            state["control"].update({"state": "needs_agent", "reason": "retry fixture"})
+
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, _, error = self.call(
+                "external-submit",
+                str(self.root),
+                "--id",
+                "build-env-retry-same",
+                "--stage",
+                "environment",
+                "--pbs",
+                str(pbs),
+                "--success-path",
+                str(second_success),
+                "--expected-files",
+                "1",
+                "--execute",
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed PBS script", error)
+
+        pbs.write_text(
+            pbs.read_text(encoding="utf-8")
+            .replace("#PBS -N env-v1", "#PBS -N env-v2")
+            .replace("build-env-v1.log", "build-env-v2.log"),
+            encoding="utf-8",
+        )
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, _, error = self.call(
+                "external-submit",
+                str(self.root),
+                "--id",
+                "build-env-retry-v2",
+                "--stage",
+                "environment",
+                "--pbs",
+                str(pbs),
+                "--success-path",
+                str(second_success),
+                "--expected-files",
+                "1",
+                "--execute",
+            )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        retry = state["experiments"]["build-env-retry-v2"]
+        self.assertEqual(retry["stage_attempt"], 2)
+        self.assertEqual(retry["retry_of"], "build-env-retry-v1")
+        self.assertEqual(retry["status"], "queued")
+
     def test_external_model_job_requires_typed_single_archive_and_capability(self) -> None:
         self.init()
         self.approve(allow_storage=True, allow_model=True)

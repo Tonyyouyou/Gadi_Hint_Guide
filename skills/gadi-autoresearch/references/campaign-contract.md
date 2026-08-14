@@ -170,8 +170,10 @@ model shard tree, pip/Hugging Face cache, extracted sample tree, or compilation 
 The preview command is available during discovery because it has no scheduler or storage side
 effect. `--execute` always requires `allow_storage_publish`; `stage=model` also requires
 `allow_model_publish`. Before final novelty clearance, the CLI additionally allows only
-candidate-independent discovery infrastructure: at most two environment/data/model jobs in total,
-500 SU total, and eight persistent entries. After that cap, or
+candidate-independent discovery infrastructure: at most six environment/data/model attempts in total,
+1,500 SU total, and 16 persistent entries, all dynamically reduced by the approved campaign.
+Each asset type permits at most three attempts. Retry a failed attempt only with a new experiment
+ID and changed PBS script; the state records its predecessor and charges all failed work. After that cap, or
 after entering planning, storage publication requires a mission-compatible novelty resolution.
 Do not create candidate-specific dependency/data variants merely to make an idea feel concrete.
 

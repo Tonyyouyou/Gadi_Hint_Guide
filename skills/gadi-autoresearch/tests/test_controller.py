@@ -149,7 +149,12 @@ class ControllerTests(unittest.TestCase):
                             "nearest_work_delta": f"Prior-work delta {name}.",
                             "estimated_cost": {"su": 1, "jobs": 1, "persistent_entries": 2},
                         }
-                        for name, status in (("one", "active"), ("two", "backup"), ("three", "backup"))
+                        for name, status in (
+                            ("one", "active"),
+                            ("two", "backup"),
+                            ("three", "backup"),
+                            ("four", "backup"),
+                        )
                     ],
                 },
                 indent=2,
@@ -338,14 +343,16 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(campaign.load_state(self.root)["control"]["agent_turns"], 0)
 
     def test_poll_interval_below_nci_limit_is_rejected(self) -> None:
-        code, _, error = self.call(str(self.root), "--poll-seconds", "60")
+        code, _, error = self.call(str(self.root), "--poll-seconds", "30")
         self.assertNotEqual(code, 0)
-        self.assertIn("at least 600", error)
+        self.assertIn("at least 60", error)
 
-    def test_codex_command_uses_safe_automatic_review(self) -> None:
+    def test_codex_command_uses_unattended_full_access_policy(self) -> None:
         state = campaign.load_state(self.root)
         command = controller.codex_command("codex", self.workspace, state, self.root)
-        self.assertIn("--approve-for-me", command)
+        self.assertNotIn("--approve-for-me", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "danger-full-access")
+        self.assertIn('approval_policy="never"', command)
         self.assertEqual(command[command.index("--add-dir") + 1], str(self.root))
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("--full-auto", command)
@@ -355,7 +362,8 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Never invent ratings", command[-1])
         state["control"]["thread_id"] = "thread-test"
         resumed = controller.codex_command("codex", self.workspace, state, self.root)
-        self.assertLess(resumed.index("--approve-for-me"), resumed.index("resume"))
+        self.assertLess(resumed.index("--sandbox"), resumed.index("resume"))
+        self.assertLess(resumed.index('approval_policy="never"'), resumed.index("resume"))
         self.assertEqual(resumed[resumed.index("--add-dir") + 1], str(self.root))
 
     def test_codex_command_pins_model_and_ultra_effort(self) -> None:
@@ -375,6 +383,26 @@ class ControllerTests(unittest.TestCase):
             'model_reasoning_effort="ultra"',
         ])
         self.assertLess(command.index("--config"), command.index("exec"))
+
+    def test_codex_canary_requires_the_expected_filesystem_marker(self) -> None:
+        fake_codex = self.base / "fake-canary-codex"
+        fake_codex.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "workspace=\n"
+            "while [ \"$#\" -gt 0 ]; do\n"
+            "  if [ \"$1\" = -C ]; then shift; workspace=$1; fi\n"
+            "  shift\n"
+            "done\n"
+            "test -n \"$workspace\"\n"
+            "printf '%s\\n' gadi-autoresearch-controller-canary-v2 > \"$workspace/canary.txt\"\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        result = controller.run_codex_canary(str(fake_codex), "gpt-5.6-sol", "ultra")
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["sandbox_mode"], "danger-full-access")
+        self.assertEqual(result["approval_policy"], "never")
 
     def test_novelty_reviewer_command_always_starts_a_fresh_thread(self) -> None:
         state = campaign.load_state(self.root)
@@ -622,10 +650,16 @@ class ControllerTests(unittest.TestCase):
         state = campaign.load_state(self.root)
         self.assertEqual(state["phase"], "portfolio")
         self.assertEqual(state["control"]["state"], "needs_agent")
-        self.assertIn("return to portfolio", state["control"]["reason"])
+        self.assertIn("automatically promoted backup candidate candidate-two", state["control"]["reason"])
         self.assertNotIn("research_track", state)
+        portfolio = json.loads((self.root / "CANDIDATE_PORTFOLIO.json").read_text(encoding="utf-8"))
+        self.assertEqual(portfolio["active_candidate_id"], "candidate-two")
+        self.assertEqual(portfolio["candidates"][0]["status"], "eliminated")
+        self.assertNotIn("idea_report", state["artifacts"])
+        self.assertNotIn("novelty_audit", state["artifacts"])
+        self.assertNotIn("novelty_review", state["artifacts"])
 
-    def test_missing_agent_handoff_pauses_instead_of_spinning(self) -> None:
+    def test_missing_agent_handoff_schedules_bounded_recovery(self) -> None:
         fake_codex = self.base / "fake-codex"
         fake_codex.write_text(
             "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-test\"}'\n",
@@ -636,11 +670,13 @@ class ControllerTests(unittest.TestCase):
             code, _, error = self.call(str(self.root), "--codex-bin", str(fake_codex), "--start")
         self.assertEqual(code, 0, error)
         state = campaign.load_state(self.root)
-        self.assertEqual(state["status"], "paused")
-        self.assertEqual(state["control"]["state"], "paused")
+        self.assertEqual(state["status"], "active")
+        self.assertEqual(state["control"]["state"], "waiting_time")
         self.assertEqual(state["control"]["agent_turns"], 1)
         self.assertEqual(state["control"]["thread_id"], "thread-test")
-        self.assertIn("without the required campaign handoff", state["control"]["reason"])
+        self.assertIn("automatic recovery 1", state["control"]["reason"])
+        self.assertEqual(state["control"]["recovery"]["category"], "missing_handoff")
+        self.assertEqual(state["control"]["recovery"]["target_state"], "needs_agent")
 
     def test_agent_prompt_requires_approved_packed_model_assets(self) -> None:
         prompt = controller.agent_prompt(self.root, campaign.load_state(self.root))
@@ -649,18 +685,18 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("exactly one .tar.zst", prompt)
         self.assertIn("compute job's PBS jobfs", prompt)
 
-    def test_stale_agent_state_pauses_instead_of_launching_duplicate(self) -> None:
+    def test_stale_agent_state_schedules_recovery(self) -> None:
         with campaign.locked_state(self.root) as state:
             state["control"].update({"state": "agent_running", "reason": "simulated controller loss"})
         code, _, error = self.call(str(self.root), "--start")
         self.assertEqual(code, 0, error)
         state = campaign.load_state(self.root)
-        self.assertEqual(state["status"], "paused")
-        self.assertEqual(state["control"]["state"], "paused")
+        self.assertEqual(state["status"], "active")
+        self.assertEqual(state["control"]["state"], "waiting_time")
         self.assertEqual(state["control"]["agent_turns"], 0)
-        self.assertIn("avoid duplicate agents", state["control"]["reason"])
+        self.assertEqual(state["control"]["recovery"]["category"], "stale_author")
 
-    def test_stale_novelty_reviewer_state_pauses_instead_of_launching_duplicate(self) -> None:
+    def test_stale_novelty_reviewer_state_schedules_recovery(self) -> None:
         with campaign.locked_state(self.root) as state:
             state["control"].update(
                 {"state": "novelty_reviewer_running", "reason": "simulated controller loss"}
@@ -668,8 +704,12 @@ class ControllerTests(unittest.TestCase):
         code, _, error = self.call(str(self.root), "--start")
         self.assertEqual(code, 0, error)
         state = campaign.load_state(self.root)
-        self.assertEqual(state["status"], "paused")
-        self.assertIn("avoid duplicate reviewers", state["control"]["reason"])
+        self.assertEqual(state["status"], "active")
+        self.assertEqual(state["control"]["state"], "waiting_time")
+        self.assertEqual(
+            state["control"]["recovery"]["category"],
+            "stale_novelty_reviewer",
+        )
 
     def test_agent_turn_budget_sets_consistent_paused_status(self) -> None:
         with campaign.locked_state(self.root) as state:
