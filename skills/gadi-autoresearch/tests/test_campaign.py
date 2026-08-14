@@ -786,6 +786,56 @@ class CampaignTests(unittest.TestCase):
         with self.assertRaisesRegex(CAMPAIGN.CampaignError, "changed after resolution"):
             CAMPAIGN.required_completion_artifacts(CAMPAIGN.load_state(self.root))
 
+    def test_waiting_human_requires_an_immutable_mission_basis(self) -> None:
+        self.init()
+        self.approve()
+        code, _, error = self.call(
+            "handoff",
+            str(self.root),
+            "--state",
+            "waiting_human",
+            "--reason",
+            "an ordinary technical failure",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("not permitted for this mission/route", error)
+
+    def test_required_human_evaluation_route_can_wait_for_real_evidence(self) -> None:
+        self.init_audio()
+        self.approve()
+        adapters = ",".join(
+            (
+                "audio.speech-generation",
+                "audio.diffusion-flow",
+                "audio.generative-quality-control",
+                "core.controlled-evidence",
+                "audio.reference-task-evaluation",
+                "audio.perceptual-generation-evaluation",
+                "core.human-evaluation",
+            )
+        )
+        self.assertEqual(
+            self.call(
+                "route-set",
+                str(self.root),
+                "--adapters",
+                adapters,
+                "--reason",
+                "TTS perceptual quality mechanism",
+            )[0],
+            0,
+        )
+        code, _, error = self.call(
+            "handoff",
+            str(self.root),
+            "--state",
+            "waiting_human",
+            "--reason",
+            "packed blinded study awaits real ratings",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(CAMPAIGN.load_state(self.root)["control"]["state"], "waiting_human")
+
     def test_human_evaluation_is_bound_to_current_claim_lineage(self) -> None:
         self.init()
         self.approve()

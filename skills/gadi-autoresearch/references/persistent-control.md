@@ -66,7 +66,7 @@ pinned settings to the long-lived author thread and to fresh novelty-review and 
 
 The starter invokes the existing modern control-plane Python explicitly, removes stale PBS/jobfs/cache and ambient model/publishing token variables, and launches a no-profile shell. It never edits HOME startup files. Before creating tmux it runs a real ephemeral Codex canary that must use `apply_patch` to create and verify an exact marker in `/tmp`. A failed canary aborts startup.
 
-The tmux process is `supervisor.py`, not the controller directly. The supervisor restarts an unexpectedly exited active controller with 15, 60, 300, then 900 second backoff. It stays idle when a campaign is deliberately paused, allowing an inspected `skill-adopt`/resume to reuse the same tmux session. The persistent-session host and tmux remain a single control-plane failure domain; if NCI restarts that host, rerun the exact recorded launcher.
+The tmux process is `supervisor.py`, not the controller directly. The supervisor restarts an unexpectedly exited active controller with 15, 60, 300, then 900 second backoff. It forwards TERM, INT, and tmux's HUP to the controller process group, so a deliberate session stop cannot orphan Codex. It stays idle when a campaign is deliberately paused, allowing an inspected `skill-adopt`/resume to reuse the same tmux session. The persistent-session host and tmux remain a single control-plane failure domain; if NCI restarts that host, rerun the exact recorded launcher.
 
 The controller holds `controller.lock`, reads `campaign.json`, and acts only on control state:
 

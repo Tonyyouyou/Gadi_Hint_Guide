@@ -87,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     args.root = campaign.canonical(args.root, strict=True)
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
+    signal.signal(signal.SIGHUP, stop_handler)
     failures = 0
     last_idle: tuple[str, str] | None = None
 

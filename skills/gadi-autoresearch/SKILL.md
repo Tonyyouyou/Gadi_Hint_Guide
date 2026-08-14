@@ -229,7 +229,7 @@ Before every Codex turn exits, write exactly one control handoff:
   --reason "jobs 123 and 124 must finish before analysis"
 ```
 
-Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `needs_novelty_arbitration` only after a conditional review, completed bound probes, and a registered `NOVELTY_REBUTTAL.json`; the author must never write the arbitration. Use `waiting_human` only when the immutable mission requires external human evidence or authorization and no autonomous branch remains, `waiting_time` with `--wake-at` for scheduled work or automatic recovery, `paused` for a hard safety/integrity boundary, and `complete` only after the completion audit passes.
+Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `needs_novelty_arbitration` only after a conditional review, completed bound probes, and a registered `NOVELTY_REBUTTAL.json`; the author must never write the arbitration. The CLI permits `waiting_human` only when the immutable mission uses `fallback_policy=wait_human`, or its resolved route requires external human evaluation under `pause_when_required`. Otherwise eliminate or revise the blocked candidate, promote a backup, return to discovery, or use `paused` for a hard authorization/integrity boundary. Use `waiting_time` with `--wake-at` for scheduled work or automatic recovery, and `complete` only after the completion audit passes.
 
 ## Completion Standard
 

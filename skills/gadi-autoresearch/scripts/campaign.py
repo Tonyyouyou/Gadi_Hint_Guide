@@ -4079,10 +4079,27 @@ def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
     return ("provisional" if "provisional" in assurances else "accepted", workspace_git["commit"])
 
 
+def require_waiting_human_basis(state: dict[str, Any]) -> None:
+    mission = state["mission"]
+    if mission.get("fallback_policy") == "wait_human":
+        return
+    if mission.get("human_evaluation_policy") == "pause_when_required":
+        route = validate_route(state)
+        if route.get("human_evaluation") == "required":
+            return
+    raise CampaignError(
+        "waiting_human is not permitted for this mission/route; eliminate or revise the "
+        "blocked candidate, promote a backup, return to discovery, or use paused for a hard "
+        "authorization/integrity boundary"
+    )
+
+
 def cmd_handoff(args: argparse.Namespace) -> None:
     with locked_state(args.root) as state:
         allow_expired = args.state in {"waiting_pbs", "waiting_human", "paused", "stopped", "complete"}
         require_approved(state, allow_expired=allow_expired)
+        if args.state == "waiting_human":
+            require_waiting_human_basis(state)
         evaluator = state["control"]["state"]
         if evaluator in {"novelty_reviewer_running", "novelty_arbiter_running"} and args.state not in {
             "needs_agent",
