@@ -105,7 +105,7 @@ class ControllerTests(unittest.TestCase):
     def prepare_novelty_review(
         self,
         *,
-        decision: str = "plausibly_novel",
+        decision: str = "clear_to_plan",
         claim_class: str = "new_mechanism",
     ) -> Path:
         idea = self.root / "IDEA_REPORT.md"
@@ -262,41 +262,53 @@ class ControllerTests(unittest.TestCase):
             for index in range(1, 4)
         ]
         review = self.root / "NOVELTY_REVIEW.json"
-        review.write_text(
-            json.dumps(
+        review_payload = {
+            "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
+            "candidate_id": "candidate-one",
+            "audit_sha256": campaign.sha256_file(audit),
+            "reviewed_at": campaign.utc_now(),
+            "independent_context": True,
+            "decision": decision,
+            "claim_class": claim_class,
+            "reviewer_searches": {
+                category: [f"reviewer {category} query"]
+                for category in campaign.NOVELTY_SEARCH_CATEGORIES
+            },
+            "sources": review_sources,
+            "prior_checks": {
+                "earliest": {"source_id": "r1", "conclusion": "Earliest primitive."},
+                "closest": {"source_id": "r2", "conclusion": "Closest lacks coupling."},
+                "newest": {"source_id": "r3", "conclusion": "Newest remains distinct."},
+                "exact_combination": {"source_id": None, "conclusion": "No exact combination."},
+            },
+            "primitive_overlap": [
                 {
-                    "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
-                    "candidate_id": "candidate-one",
-                    "audit_sha256": campaign.sha256_file(audit),
-                    "reviewed_at": campaign.utc_now(),
-                    "independent_context": True,
-                    "decision": decision,
-                    "claim_class": claim_class,
-                    "reviewer_searches": {
-                        category: [f"reviewer {category} query"]
-                        for category in campaign.NOVELTY_SEARCH_CATEGORIES
-                    },
-                    "sources": review_sources,
-                    "prior_checks": {
-                        "earliest": {"source_id": "r1", "conclusion": "Earliest primitive."},
-                        "closest": {"source_id": "r2", "conclusion": "Closest lacks coupling."},
-                        "newest": {"source_id": "r3", "conclusion": "Newest remains distinct."},
-                        "exact_combination": {"source_id": None, "conclusion": "No exact combination."},
-                    },
-                    "primitive_overlap": [
-                        {
-                            "primitive_id": "adaptive-replay",
-                            "source_ids": ["r1", "r2", "r3"],
-                            "assessment": "Primitive is known but the proposed control interaction was not found.",
-                        }
-                    ],
-                    "strongest_rejection": "Could reduce to confidence-triggered recomputation.",
-                    "author_rebuttal_assessment": "Rebuttal survives for boundary selection only.",
-                    "blocking_overlaps": [],
-                    "required_changes": [],
-                },
-                indent=2,
-            )
+                    "primitive_id": "adaptive-replay",
+                    "source_ids": ["r1", "r2", "r3"],
+                    "assessment": "Primitive is known but the proposed control interaction was not found.",
+                }
+            ],
+            "strongest_rejection": "Could reduce to confidence-triggered recomputation.",
+            "author_rebuttal_assessment": "Rebuttal survives for boundary selection only.",
+            "blocking_overlaps": [],
+            "required_changes": [],
+        }
+        if decision == "conditional_probe":
+            review_payload["probe_plan"] = {
+                "question": "Does coupling beat a naive serial composition?",
+                "naive_combination_baseline": "Independent stability scoring then replay.",
+                "distinguishing_outcome": "Lower latency at matched error.",
+                "falsifier": "No gain over the serial baseline.",
+            }
+        if decision == "exact_prior_reject":
+            review_payload["prior_checks"]["exact_combination"] = {
+                "source_id": "r2",
+                "conclusion": "The closest source implements the same control interaction.",
+                "functionally_equivalent": True,
+                "equivalence_evidence": "Methods 2 uses the same trigger, boundary, and replay effect.",
+            }
+        review.write_text(
+            json.dumps(review_payload, indent=2)
             + "\n",
             encoding="utf-8",
         )
@@ -417,8 +429,181 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(state["control"]["state"], "needs_agent")
         self.assertEqual(state["control"]["agent_turns"], 1)
 
+    def test_conditional_review_stays_in_novelty_review_for_bounded_probes(self) -> None:
+        review = self.prepare_novelty_review(decision="conditional_probe")
+        fake_codex = self.base / "fake-conditional-reviewer-codex"
+        cli = SCRIPTS / "campaign.py"
+        fake_codex.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} artifact {shlex.quote(str(self.root))} "
+            f"--name novelty_review --path {shlex.quote(str(review))} --assurance provisional\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} handoff {shlex.quote(str(self.root))} "
+            "--state needs_agent --reason 'conditional novelty probe required'\n"
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"conditional-reviewer-thread\"}'\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        with mock.patch.object(controller.campaign, "live_preflight", return_value={}):
+            controller.run_novelty_reviewer(self.root, str(fake_codex))
+        state = campaign.load_state(self.root)
+        self.assertEqual(state["phase"], "novelty_review")
+        self.assertEqual(state["control"]["state"], "needs_agent")
+        self.assertIn("bounded novelty probes", state["control"]["reason"])
+        self.assertNotIn("research_track", state)
+        self.assertEqual(campaign.current_probe_binding(state)["clearance"], "conditional_probe")
+
+    def test_controller_attests_third_thread_arbitration(self) -> None:
+        review = self.prepare_novelty_review(decision="conditional_probe")
+        cli = SCRIPTS / "campaign.py"
+        fake_reviewer = self.base / "fake-conditional-reviewer"
+        fake_reviewer.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} artifact {shlex.quote(str(self.root))} "
+            f"--name novelty_review --path {shlex.quote(str(review))} --assurance provisional\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} handoff {shlex.quote(str(self.root))} "
+            "--state needs_agent --reason 'conditional review complete'\n"
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"reviewer-thread\"}'\n",
+            encoding="utf-8",
+        )
+        fake_reviewer.chmod(0o755)
+        with mock.patch.object(controller.campaign, "live_preflight", return_value={}):
+            controller.run_novelty_reviewer(self.root, str(fake_reviewer))
+
+        state = campaign.load_state(self.root)
+        binding = campaign.current_probe_binding(state)
+        success_file = self.root / "runs" / "probe-one" / "metrics.json"
+        success_file.parent.mkdir(parents=True)
+        success_file.write_text('{"status":"ok"}\n', encoding="utf-8")
+        with campaign.locked_state(self.root) as current:
+            current["experiments"]["probe-one"] = {
+                "id": "probe-one",
+                "stage": campaign.NOVELTY_PROBE_STAGE,
+                "mode": "batch",
+                "status": "completed",
+                "max_su": 1.0,
+                "expected_files": 1,
+                "success_file": str(success_file),
+                "claim_binding": binding,
+                "attempts": [],
+            }
+        audit = self.root / "NOVELTY_AUDIT.json"
+        rebuttal = self.root / "NOVELTY_REBUTTAL.json"
+        rebuttal.write_text(
+            json.dumps(
+                {
+                    "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
+                    "candidate_id": "candidate-one",
+                    "audit_sha256": campaign.sha256_file(audit),
+                    "review_sha256": campaign.sha256_file(review),
+                    "written_at": campaign.utc_now(),
+                    "probe_experiment_ids": ["probe-one"],
+                    "probe_results": [
+                        {
+                            "experiment_id": "probe-one",
+                            "success_file_sha256": campaign.sha256_file(success_file),
+                            "finding": "Coupling beats the naive baseline at matched error.",
+                        }
+                    ],
+                    "reviewer_objections": [
+                        {
+                            "objection": "This may be a naive A+B composition.",
+                            "response": "The controlled probe isolates a coupled boundary effect.",
+                            "evidence_experiment_ids": ["probe-one"],
+                        }
+                    ],
+                    "naive_combination_baseline": "Independent stability scoring then replay.",
+                    "distinguishing_result": "Lower latency at matched error.",
+                    "author_position": "advance",
+                    "remaining_risks": [],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "artifact",
+                        str(self.root),
+                        "--name",
+                        "novelty_rebuttal",
+                        "--path",
+                        str(rebuttal),
+                        "--assurance",
+                        "provisional",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "handoff",
+                        str(self.root),
+                        "--state",
+                        "needs_novelty_arbitration",
+                        "--reason",
+                        "probe and rebuttal complete",
+                    ]
+                ),
+                0,
+            )
+
+        arbitration = self.root / "NOVELTY_ARBITRATION.json"
+        arbitration.write_text(
+            json.dumps(
+                {
+                    "schema_version": campaign.NOVELTY_SCHEMA_VERSION,
+                    "candidate_id": "candidate-one",
+                    "audit_sha256": campaign.sha256_file(audit),
+                    "review_sha256": campaign.sha256_file(review),
+                    "rebuttal_sha256": campaign.sha256_file(rebuttal),
+                    "arbitrated_at": campaign.utc_now(),
+                    "independent_context": True,
+                    "decision": "clear_to_plan",
+                    "claim_class": "new_mechanism",
+                    "probe_validity_assessment": "The probe isolates the coupling.",
+                    "naive_combination_assessment": "The baseline is faithful and competitive.",
+                    "non_obvious_interaction_assessment": "The effect exceeds independent composition.",
+                    "paper_contribution_assessment": "The evidence supports a primary mechanism claim.",
+                    "blocking_issues": [],
+                    "required_changes": [],
+                    "exact_prior": None,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fake_arbiter = self.base / "fake-arbiter-codex"
+        fake_arbiter.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} artifact {shlex.quote(str(self.root))} "
+            f"--name novelty_arbitration --path {shlex.quote(str(arbitration))} --assurance provisional\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} handoff {shlex.quote(str(self.root))} "
+            "--state needs_agent --reason 'independent arbitration complete'\n"
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"arbiter-thread\"}'\n",
+            encoding="utf-8",
+        )
+        fake_arbiter.chmod(0o755)
+        with mock.patch.object(controller.campaign, "live_preflight", return_value={}):
+            controller.run_novelty_arbiter(self.root, str(fake_arbiter))
+        state = campaign.load_state(self.root)
+        record = state["artifacts"]["novelty_arbitration"]
+        self.assertTrue(record["cold_arbitration"])
+        self.assertEqual(record["arbiter_thread_id"], "arbiter-thread")
+        self.assertEqual(record["review_thread_id"], "reviewer-thread")
+        self.assertEqual(state["research_track"], "new_mechanism")
+        self.assertEqual(state["control"]["state"], "needs_agent")
+
     def test_rejected_review_automatically_returns_to_portfolio(self) -> None:
-        review = self.prepare_novelty_review(decision="derivative", claim_class="new_application")
+        review = self.prepare_novelty_review(
+            decision="exact_prior_reject",
+            claim_class="new_mechanism",
+        )
         fake_codex = self.base / "fake-rejecting-reviewer-codex"
         cli = SCRIPTS / "campaign.py"
         fake_codex.write_text(

@@ -346,7 +346,7 @@ class CampaignTests(unittest.TestCase):
             }
             for index in range(1, 4)
         ]
-        return {
+        payload = {
             "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
             "candidate_id": candidate_id,
             "idea_report_sha256": CAMPAIGN.sha256_file(idea_report),
@@ -383,6 +383,7 @@ class CampaignTests(unittest.TestCase):
             "strongest_rejection": "Confidence-triggered recomputation may already implement the same mechanism.",
             "author_rebuttal": "The checked work uses confidence for stopping, not replay-boundary selection.",
         }
+        return payload
 
     def write_novelty_audit(
         self,
@@ -402,7 +403,7 @@ class CampaignTests(unittest.TestCase):
         self,
         audit: Path,
         *,
-        decision: str = "plausibly_novel",
+        decision: str = "clear_to_plan",
         claim_class: str = "new_mechanism",
     ) -> dict[str, object]:
         audit_payload = json.loads(audit.read_text(encoding="utf-8"))
@@ -419,7 +420,7 @@ class CampaignTests(unittest.TestCase):
             }
             for index in range(1, 4)
         ]
-        return {
+        payload = {
             "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
             "candidate_id": audit_payload["candidate_id"],
             "audit_sha256": CAMPAIGN.sha256_file(audit),
@@ -455,12 +456,27 @@ class CampaignTests(unittest.TestCase):
             "blocking_overlaps": [],
             "required_changes": [],
         }
+        if decision == "conditional_probe":
+            payload["probe_plan"] = {
+                "question": "Does the coupled rule outperform a naive serial composition?",
+                "naive_combination_baseline": "Apply stability scoring, then selective replay independently.",
+                "distinguishing_outcome": "The coupled boundary rule improves latency at matched error.",
+                "falsifier": "No improvement over the naive composition at matched error.",
+            }
+        if decision == "exact_prior_reject":
+            payload["prior_checks"]["exact_combination"] = {
+                "source_id": "r2",
+                "conclusion": "The closest paper implements the same boundary rule.",
+                "functionally_equivalent": True,
+                "equivalence_evidence": "Methods section 2 uses the same score, trigger, and replay scope.",
+            }
+        return payload
 
     def record_cold_review(
         self,
         audit: Path,
         *,
-        decision: str = "plausibly_novel",
+        decision: str = "clear_to_plan",
         claim_class: str = "new_mechanism",
     ) -> Path:
         review = self.root / "NOVELTY_REVIEW.json"
@@ -494,6 +510,118 @@ class CampaignTests(unittest.TestCase):
         audit = self.write_novelty_audit(idea)
         review = self.record_cold_review(audit)
         return idea, audit, review
+
+    def record_conditional_review(self) -> tuple[Path, Path, Path]:
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["phase"] = "novelty_review"
+        review = self.record_cold_review(
+            audit,
+            decision="conditional_probe",
+            claim_class="new_mechanism",
+        )
+        return idea, audit, review
+
+    def complete_probe(self, experiment_id: str) -> Path:
+        with CAMPAIGN.locked_state(self.root) as state:
+            experiment = state["experiments"][experiment_id]
+            success_file = Path(experiment["success_file"])
+            success_file.parent.mkdir(parents=True, exist_ok=True)
+            success_file.write_text('{"status":"ok"}\n', encoding="utf-8")
+            experiment["status"] = "completed"
+        return success_file
+
+    def record_novelty_rebuttal(
+        self,
+        audit: Path,
+        review: Path,
+        experiment_ids: list[str],
+    ) -> Path:
+        results = []
+        for experiment_id in experiment_ids:
+            state = CAMPAIGN.load_state(self.root)
+            success_file = Path(state["experiments"][experiment_id]["success_file"])
+            results.append(
+                {
+                    "experiment_id": experiment_id,
+                    "success_file_sha256": CAMPAIGN.sha256_file(success_file),
+                    "finding": "The coupled rule beats the naive composition at matched error.",
+                }
+            )
+        payload = {
+            "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
+            "candidate_id": "adaptive-replay",
+            "audit_sha256": CAMPAIGN.sha256_file(audit),
+            "review_sha256": CAMPAIGN.sha256_file(review),
+            "written_at": CAMPAIGN.utc_now(),
+            "probe_experiment_ids": experiment_ids,
+            "probe_results": results,
+            "reviewer_objections": [
+                {
+                    "objection": "The mechanism may be a naive serial composition.",
+                    "response": "The controlled probe isolates a coupled boundary effect.",
+                    "evidence_experiment_ids": experiment_ids,
+                }
+            ],
+            "naive_combination_baseline": "Independent stability scoring followed by replay.",
+            "distinguishing_result": "Coupling improves latency at matched error.",
+            "author_position": "advance",
+            "remaining_risks": ["The effect may vary by model family."],
+        }
+        path = self.root / "NOVELTY_REBUTTAL.json"
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        self.record_artifact("novelty_rebuttal", path, "provisional")
+        return path
+
+    def record_novelty_arbitration(
+        self,
+        audit: Path,
+        review: Path,
+        rebuttal: Path,
+        *,
+        decision: str = "clear_to_plan",
+    ) -> Path:
+        payload = {
+            "schema_version": CAMPAIGN.NOVELTY_SCHEMA_VERSION,
+            "candidate_id": "adaptive-replay",
+            "audit_sha256": CAMPAIGN.sha256_file(audit),
+            "review_sha256": CAMPAIGN.sha256_file(review),
+            "rebuttal_sha256": CAMPAIGN.sha256_file(rebuttal),
+            "arbitrated_at": CAMPAIGN.utc_now(),
+            "independent_context": True,
+            "decision": decision,
+            "claim_class": "new_mechanism",
+            "probe_validity_assessment": "The controlled comparison isolates the coupling.",
+            "naive_combination_assessment": "The baseline faithfully composes the known primitives.",
+            "non_obvious_interaction_assessment": "The measured boundary effect is not additive tuning.",
+            "paper_contribution_assessment": "The mechanism supports a primary method claim.",
+            "blocking_issues": [],
+            "required_changes": [],
+            "exact_prior": None,
+        }
+        path = self.root / "NOVELTY_ARBITRATION.json"
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["control"]["state"] = "novelty_arbiter_running"
+        self.record_artifact("novelty_arbitration", path, "provisional")
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["artifacts"]["novelty_arbitration"].update(
+                {
+                    "cold_arbitration": True,
+                    "arbiter_thread_id": "arbiter-thread-test",
+                    "author_thread_id": "author-thread-test",
+                    "review_thread_id": "review-thread-test",
+                    "reviewed_rebuttal_sha256": CAMPAIGN.sha256_file(rebuttal),
+                }
+            )
+            state["control"].update(
+                {
+                    "state": "needs_agent",
+                    "novelty_arbitration_thread_id": "arbiter-thread-test",
+                }
+            )
+        return path
 
     def test_init_creates_compact_draft_state(self) -> None:
         self.init()
@@ -1004,6 +1132,99 @@ class CampaignTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, error)
 
+    def test_conditional_probe_requires_rebuttal_and_independent_arbitration(self) -> None:
+        self.init(max_su=100_000)
+        self.approve()
+        _, audit, review = self.record_conditional_review()
+
+        code, _, error = self.add_batch("main-before-arbitration", "main")
+        self.assertNotEqual(code, 0)
+        self.assertIn("novelty_rebuttal", error)
+
+        code, _, error = self.add_batch("probe-coupling", "novelty_probe")
+        self.assertEqual(code, 0, error)
+        success_file = self.complete_probe("probe-coupling")
+        self.assertTrue(success_file.is_file())
+        rebuttal = self.record_novelty_rebuttal(audit, review, ["probe-coupling"])
+        code, _, error = self.call(
+            "handoff",
+            str(self.root),
+            "--state",
+            "needs_novelty_arbitration",
+            "--reason",
+            "bounded probe and rebuttal complete",
+        )
+        self.assertEqual(code, 0, error)
+        arbitration = self.record_novelty_arbitration(audit, review, rebuttal)
+        self.assertTrue(arbitration.is_file())
+
+        code, _, error = self.add_batch("main-after-arbitration", "main")
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        binding = state["experiments"]["main-after-arbitration"]["claim_binding"]
+        self.assertEqual(binding["novelty_rebuttal_sha256"], CAMPAIGN.sha256_file(rebuttal))
+        self.assertEqual(binding["novelty_arbitration_sha256"], CAMPAIGN.sha256_file(arbitration))
+
+    def test_conditional_probe_registration_obeys_hard_job_cap(self) -> None:
+        self.init(max_files=128, max_su=100_000)
+        self.approve()
+        self.record_conditional_review()
+        for index in range(3):
+            code, _, error = self.add_batch(f"probe-{index}", "novelty_probe", expected_files=2)
+            self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("probe-four", "novelty_probe", expected_files=2)
+        self.assertNotEqual(code, 0)
+        self.assertIn("at most three", error)
+
+    def test_exact_prior_reject_requires_functional_equivalence_evidence(self) -> None:
+        self.init()
+        self.approve()
+        idea = self.write_idea_report()
+        audit = self.write_novelty_audit(idea)
+        payload = self.novelty_review_payload(
+            audit,
+            decision="exact_prior_reject",
+            claim_class="new_mechanism",
+        )
+        exact = payload["prior_checks"]["exact_combination"]
+        assert isinstance(exact, dict)
+        exact.pop("equivalence_evidence")
+        review = self.root / "NOVELTY_REVIEW.json"
+        review.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["control"]["state"] = "novelty_reviewer_running"
+        code, _, error = self.call(
+            "artifact",
+            str(self.root),
+            "--name",
+            "novelty_review",
+            "--path",
+            str(review),
+            "--assurance",
+            "provisional",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("equivalence_evidence", error)
+
+        legacy = self.novelty_review_payload(
+            audit,
+            decision="derivative",
+            claim_class="new_application",
+        )
+        review.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8")
+        code, _, error = self.call(
+            "artifact",
+            str(self.root),
+            "--name",
+            "novelty_review",
+            "--path",
+            str(review),
+            "--assurance",
+            "provisional",
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("clear_to_plan, conditional_probe, or exact_prior_reject", error)
+
     def test_forward_phase_skip_is_rejected(self) -> None:
         self.init()
         self.approve()
@@ -1022,7 +1243,7 @@ class CampaignTests(unittest.TestCase):
         self.approve()
         idea = self.write_idea_report()
         audit = self.write_novelty_audit(idea)
-        self.record_cold_review(audit, decision="derivative", claim_class="new_application")
+        self.record_cold_review(audit, decision="clear_to_plan", claim_class="new_application")
         code, _, error = self.add_batch("diagnostic-baseline", "baseline")
         self.assertNotEqual(code, 0)
         self.assertIn("requires returning to discovery", error)
@@ -1035,7 +1256,7 @@ class CampaignTests(unittest.TestCase):
         self.approve()
         idea = self.write_idea_report()
         audit = self.write_novelty_audit(idea)
-        self.record_cold_review(audit, decision="derivative", claim_class="new_application")
+        self.record_cold_review(audit, decision="clear_to_plan", claim_class="new_application")
         code, _, error = self.add_batch("diagnostic-baseline", "baseline")
         self.assertEqual(code, 0, error)
         code, _, error = self.add_batch("derivative-main", "main")
@@ -1413,16 +1634,15 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         self.assertFalse(self.qsub_log.exists())
         with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
-            code, _, error = self.call(*arguments, "--execute")
-        self.assertNotEqual(code, 0)
-        self.assertIn("novelty_audit", error)
-        self.record_method_clearance()
-        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
             code, output, error = self.call(*arguments, "--execute")
         self.assertEqual(code, 0, error)
         self.assertIn("12345.gadi-pbs", output)
         state = CAMPAIGN.load_state(self.root)
         self.assertEqual(state["experiments"]["build-env-v2"]["mode"], "external")
+        self.assertEqual(
+            state["experiments"]["build-env-v2"]["clearance"],
+            "discovery_infrastructure",
+        )
         self.assertEqual(state["experiments"]["build-env-v2"]["status"], "queued")
 
     def test_refresh_obeys_ten_minute_guard(self) -> None:

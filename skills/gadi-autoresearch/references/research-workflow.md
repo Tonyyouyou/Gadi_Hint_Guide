@@ -127,11 +127,23 @@ schema-version-2 `NOVELTY_AUDIT.json` bound to mission, route, portfolio, and id
 
 The controller starts a fresh non-resumed reviewer. It independently searches the mechanism,
 classifies the actual contribution, and writes `NOVELTY_REVIEW.json`. The author never writes the
-verdict artifact.
+verdict artifact. It must distinguish three outcomes:
 
-Planning is allowed only when the reviewed claim class is in the mission's
-`acceptable_contributions`. If the reviewer rejects, requests changes, or reclassifies the active
-candidate outside the mission, the controller automatically returns to:
+- `clear_to_plan` when a mission-compatible primary delta survives and no exact prior exists
+- `exact_prior_reject` only with a checked functionally equivalent primary source
+- `conditional_probe` when no exact prior exists but a cheap empirical comparison can distinguish
+  a non-obvious interaction from a faithful naive A+B composition
+
+For `conditional_probe`, stay in `novelty_review`. Run only the machine-capped `novelty_probe`
+stage, answer the declared question against the naive combination, and bind completed success
+markers into `NOVELTY_REBUTTAL.json`. Hand off to `needs_novelty_arbitration`; a fresh third thread
+distinct from both author and reviewer writes `NOVELTY_ARBITRATION.json`. It either clears the
+narrow primary claim or rejects it with functionally equivalent exact-prior evidence. No ordinary
+pilot/main/ablation or full implementation starts while this dispute remains open.
+
+Planning is allowed only when the reviewed or arbitrated claim class is in the mission's
+`acceptable_contributions`. If the reviewer/arbiter hard-rejects, or a legacy verdict requests
+changes or reclassifies the active candidate outside the mission, the controller returns to:
 
 - `portfolio` when a backup candidate exists
 - `discovery` when no backup remains

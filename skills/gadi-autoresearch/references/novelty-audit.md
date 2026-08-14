@@ -6,7 +6,9 @@
 2. Search protocol
 3. Author artifact
 4. Cold reviewer artifact
-5. Gate outcomes
+5. Conditional probe and rebuttal
+6. Independent arbitration
+7. Gate outcomes
 
 ## Purpose
 
@@ -18,9 +20,11 @@ and theory. Separate these questions:
 2. Is the mechanism new?
 3. Is only its use in this task new?
 
-A useful transfer from another field is not automatically a new method. Classify it as
-`new_application` unless the target setting forces a technically non-obvious mechanism or
-interaction that the source-field method did not contain.
+A useful transfer from another field is not automatically a new method. Conversely, the existence
+of a broad primitive in another ordered modality does not make every target-domain mechanism
+derivative. Classify a transfer as `new_application` when brand substitution leaves the functional
+mechanism unchanged. Preserve a primary claim only when the target setting forces a technically
+non-obvious mechanism or interaction absent from the checked prior work.
 
 The mission decides which contribution classes may be final. The author performs a structured audit
 of the active portfolio candidate. The controller then starts a fresh Codex thread for
@@ -46,8 +50,8 @@ Use current web search. Inspect primary papers and official code, not only title
 search snippets, surveys, or model-generated summaries. Record at least three checked primary
 sources and the three nearest mechanism neighbors. For every source, record a plausible year,
 the section/page/algorithm/code locator actually inspected, and a concise paraphrase of its
-mechanism evidence. Negative search is never proof of novelty; the strongest permitted
-conclusion is `plausibly_novel`.
+mechanism evidence. Negative search is never proof of novelty; the strongest permitted conclusion
+is `clear_to_plan`, which means only that the bounded research plan is justified.
 
 Apply two explicit falsification tests:
 
@@ -55,7 +59,8 @@ Apply two explicit falsification tests:
   unchanged, the delta is probably an application or evaluation contribution.
 - **A+B decomposition:** search each primitive, every pair, and the combined control flow. A
   collection of known components is a method contribution only when the interaction is both
-  absent from prior work and technically non-obvious.
+  absent from prior work and technically non-obvious. The statement that one *could* combine A+B
+  is not evidence that the combination exists, is obvious, or has the claimed interaction.
 
 ## Author Artifact
 
@@ -194,7 +199,7 @@ be `null`, and its `conclusion` must explain that the exact combination was not 
   "audit_sha256": "sha256-of-recorded-NOVELTY_AUDIT.json",
   "reviewed_at": "2026-08-13T00:00:00Z",
   "independent_context": true,
-  "decision": "plausibly_novel",
+  "decision": "clear_to_plan",
   "claim_class": "new_mechanism",
   "reviewer_searches": {
     "exact_mechanism": ["independent query"],
@@ -270,19 +275,149 @@ The reviewer registers this artifact with `--assurance provisional` and hands of
 - every schema/search/source/primitive check passes
 - the reviewer made the required handoff
 
+The current reviewer decisions are exactly:
+
+- `clear_to_plan`: no functionally equivalent exact prior was found, the remaining primary delta
+  is technically justified, and both `blocking_overlaps` and `required_changes` are empty.
+- `conditional_probe`: no functionally equivalent exact prior was found, but whether the proposed
+  interaction exceeds a faithful naive A+B baseline is an empirical question answerable cheaply.
+- `exact_prior_reject`: a checked primary source implements the functionally equivalent mechanism.
+
+For `conditional_probe`, add this required object to the review:
+
+```json
+"probe_plan": {
+  "question": "Single empirical novelty question.",
+  "naive_combination_baseline": "Faithful competitive A+B implementation.",
+  "distinguishing_outcome": "Result that supports a non-obvious interaction.",
+  "falsifier": "Result that defeats the proposed interaction claim."
+}
+```
+
+For `exact_prior_reject`, `prior_checks.exact_combination` must instead be:
+
+```json
+{
+  "source_id": "r2",
+  "conclusion": "Why this is the exact functional precedent.",
+  "functionally_equivalent": true,
+  "equivalence_evidence": "Checked algorithm or control-flow evidence showing the same inputs, decision, and effect."
+}
+```
+
+Known primitives, a plausible A+B composition, brand similarity, or weak expected performance are
+not sufficient for `exact_prior_reject`. If there is no exact prior and the remaining dispute is
+empirical, the reviewer must use `conditional_probe` rather than manufacture a hard rejection.
+
+## Conditional Probe and Rebuttal
+
+The controller keeps the phase at `novelty_review`. Only `novelty_probe` experiments are opened;
+planning and ordinary claim-bearing stages remain closed. Limits are the smaller of the campaign
+envelope and all of these hard caps:
+
+- three submitted job attempts
+- 1,000 SU total, dynamically reduced for smaller campaigns
+- one GPU and four hours per job
+- 32 persistent entries including bounded output/log reserve
+
+Every probe is hash-bound to the mission, route, portfolio, idea, audit, and cold review. It must
+test the review's distinguishing question against the declared naive-combination baseline. After
+one to three completed probes, the author writes and registers this exact provisional artifact:
+
+```json
+{
+  "schema_version": 2,
+  "candidate_id": "safe-short-id",
+  "audit_sha256": "sha256-of-recorded-NOVELTY_AUDIT.json",
+  "review_sha256": "sha256-of-recorded-NOVELTY_REVIEW.json",
+  "written_at": "2026-08-14T00:00:00Z",
+  "probe_experiment_ids": ["probe-coupling"],
+  "probe_results": [
+    {
+      "experiment_id": "probe-coupling",
+      "success_file_sha256": "sha256-of-published-success-marker",
+      "finding": "Compact factual result, including the matched comparison."
+    }
+  ],
+  "reviewer_objections": [
+    {
+      "objection": "The reviewer's concrete blocking objection.",
+      "response": "Evidence-based response without expanding the claim.",
+      "evidence_experiment_ids": ["probe-coupling"]
+    }
+  ],
+  "naive_combination_baseline": "The implemented faithful A+B baseline.",
+  "distinguishing_result": "Why the result supports a non-obvious interaction rather than branding or tuning.",
+  "author_position": "advance",
+  "remaining_risks": ["Unresolved limitation, or an empty list only when none remains."]
+}
+```
+
+The CLI verifies that every referenced experiment is a completed current-lineage `novelty_probe`
+and that each success-marker hash matches. Then request the third evaluator:
+
+```bash
+"$PYTHON" "$CAMPAIGN" artifact "$ROOT" \
+  --name novelty_rebuttal --path "$ROOT/NOVELTY_REBUTTAL.json" --assurance provisional
+"$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state needs_novelty_arbitration \
+  --reason "bounded novelty probes and bound rebuttal complete"
+```
+
+The author must never create or register `NOVELTY_ARBITRATION.json`.
+
+## Independent Arbitration
+
+The controller starts a fresh non-resumed third thread. Its ID must differ from both the resumable
+author thread and cold-review thread. It reads the checked prior work, probe results, review, and
+rebuttal; it may not modify source or run more experiments. It writes:
+
+```json
+{
+  "schema_version": 2,
+  "candidate_id": "safe-short-id",
+  "audit_sha256": "sha256-of-recorded-NOVELTY_AUDIT.json",
+  "review_sha256": "sha256-of-recorded-NOVELTY_REVIEW.json",
+  "rebuttal_sha256": "sha256-of-recorded-NOVELTY_REBUTTAL.json",
+  "arbitrated_at": "2026-08-14T01:00:00Z",
+  "independent_context": true,
+  "decision": "clear_to_plan",
+  "claim_class": "new_mechanism",
+  "probe_validity_assessment": "Whether the probe isolates the disputed interaction.",
+  "naive_combination_assessment": "Whether the A+B baseline is faithful and competitive.",
+  "non_obvious_interaction_assessment": "Whether the result exceeds ordinary composition or tuning.",
+  "paper_contribution_assessment": "The narrow paper-facing contribution that remains.",
+  "blocking_issues": [],
+  "required_changes": [],
+  "exact_prior": null
+}
+```
+
+For `exact_prior_reject`, `exact_prior` must contain `title`, an HTTP(S) `url`,
+`checked_locator`, `equivalence_evidence`, `primary_source: true`, `full_text_checked: true`, and
+`functionally_equivalent: true`. A clear arbitration requires a mission-accepted primary class,
+no blocking issues, and `exact_prior: null`. The controller binds final clearance to both the
+rebuttal and arbitration hashes.
+
 ## Gate Outcomes
 
 | Review outcome | Permitted work |
 |---|---|
-| `plausibly_novel` + mission-accepted primary class | Claim-bearing pilot, main, and ablation under the matching adapter evidence protocol |
+| `clear_to_plan` (or legacy `plausibly_novel`) + mission-accepted primary class | Claim-bearing pilot, main, and ablation under the matching adapter evidence protocol |
+| `conditional_probe` | At most the bounded `novelty_probe` jobs, then rebuttal and third-thread arbitration |
+| Attested arbitration `clear_to_plan` | Claim-bearing work bound to review, rebuttal, and arbitration hashes |
+| `exact_prior_reject` from cold review or arbitration | Controller returns to portfolio/discovery; no claim-bearing work |
 | Mission explicitly permits the resolved fallback class | Application/reproduction/diagnostic baseline, audit, and paper only |
 | Rejected, unresolved, required changes, or class outside mission | Controller returns to portfolio when a backup exists, otherwise discovery |
 
 `discovery`, `sanity`, and `profile` experiments may run before the gate because they generate
-bounded observations or test infrastructure/feasibility with existing frozen inputs. Environment/data scripts may be previewed, but new
-persistent storage jobs also wait for a resolved classification. All later experiment
-registration and submission revalidate the bound artifacts.
+bounded observations or test infrastructure/feasibility with existing frozen inputs. Before final
+clearance, at most two candidate-independent storage jobs may publish one environment and one data
+object, totaling at most 500 SU and eight persistent entries. They still require explicit
+`allow_storage_publish`, the audited jobfs builder/packer, an immutable `.sqsh` under
+`/g/data/wa66/Xiangyu/enviroment_cache`, or packed data under `/g/data/wa66/Xiangyu/Data`.
+All experiment registration and submission revalidate the applicable bound artifacts and caps.
 Changing the mission requires a new campaign. Changing the route or portfolio invalidates later
-claim artifacts. Changing the idea report invalidates the audit; changing the audit invalidates the review. A
-review older than 30 days blocks later work and final completion until the search is refreshed
-through a new audit and a new fresh reviewer thread.
+claim artifacts. Changing the idea report invalidates the audit; changing the audit invalidates the
+review, rebuttal, and arbitration. A new review invalidates prior rebuttal/arbitration. A review
+older than 30 days blocks later work and final completion until the search is refreshed through a
+new audit and a new fresh reviewer thread.

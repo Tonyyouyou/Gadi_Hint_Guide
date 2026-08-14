@@ -62,7 +62,7 @@ bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN \
 ```
 
 Keep an exact launcher in the campaign root for failure recovery. The controller forwards the
-pinned settings to the long-lived author thread and to fresh novelty-review threads.
+pinned settings to the long-lived author thread and to fresh novelty-review and arbitration threads.
 
 The starter invokes the existing modern control-plane Python explicitly and launches a no-profile shell with stale PBS/jobfs/cache variables removed. It never edits HOME startup files.
 
@@ -72,6 +72,7 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 |---|---|
 | `needs_agent` | start/resume one `codex exec` turn |
 | `needs_novelty_review` | start one fresh, non-resumed adversarial reviewer thread |
+| `needs_novelty_arbitration` | start one fresh, non-resumed arbiter thread distinct from author and reviewer |
 | `waiting_pbs` | refresh tracked batch jobs at the permitted cadence, or wake the agent to inspect a recorded interactive tmux pane |
 | `waiting_time` | sleep until recorded UTC time |
 | `waiting_human` | exit and preserve state |
@@ -80,7 +81,7 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 
 Before launching Codex it verifies the pinned skill revision, reruns live
 project/inode/file-envelope preflight, and changes the state to `agent_running` or
-`novelty_reviewer_running`. Codex must write a handoff. A failed revision check/preflight,
+`novelty_reviewer_running`/`novelty_arbiter_running`. Codex must write a handoff. A failed revision check/preflight,
 nonzero exit, or missing handoff pauses the campaign, preventing a hot loop.
 
 The controller uses Codex's `--approve-for-me` automatic command review so a deliberately approved unattended campaign can progress without an interactive prompt. It keeps the source repository as the workspace and adds only the recorded campaign root as an extra writable directory. This does not bypass the workspace sandbox, user rules, the campaign CLI, or its project/SU/job/GPU/deadline/file capabilities. Raw `qsub`/`qdel` remain forbidden.
@@ -90,7 +91,10 @@ author session on every wake if the CLI returns no resumable ID. Novelty review 
 exception: each requested review starts without `resume`, receives an adversarial role prompt,
 and may only register the review plus handoff. The controller rejects an author/reviewer thread
 ID match, audit mutation, invalid schema, non-provisional same-family assurance, or missing
-handoff before attaching `cold_review` metadata. It never passes dangerous approval/sandbox
+handoff before attaching `cold_review` metadata. Conditional review opens only bounded probes;
+after a bound rebuttal, arbitration is another fresh non-resumed thread that may only register the
+arbitration and handoff. The controller rejects any reused author/reviewer/arbiter ID or changed
+audit/review/rebuttal before attaching `cold_arbitration` metadata. It never passes dangerous approval/sandbox
 bypass flags and rotates a single log at 5 MiB.
 
 ## Failure Recovery
@@ -101,7 +105,7 @@ After login disconnect, persistent-session restart, Codex failure, or controller
 2. Verify active PBS jobs with one permitted refresh.
 3. Read the bounded controller and relevant PBS log.
 4. Confirm `campaign.json`, workspace Git commit, `.sqsh`, data objects, and result markers still exist.
-5. A stale `agent_running` or `novelty_reviewer_running` state pauses on restart to avoid launching a duplicate Codex process. Inspect the named tmux/controller process, then use `campaign.py resume` with a concrete reason only after no agent is running.
+5. A stale `agent_running`, `novelty_reviewer_running`, or `novelty_arbiter_running` state pauses on restart to avoid launching a duplicate Codex process. Inspect the named tmux/controller process, then use `campaign.py resume` with a concrete reason only after no agent is running.
 6. If authentication/session resume fails, pause and deliberately start a new Codex thread from campaign state rather than reconstructing progress from tmux text.
 
 If the installed skill revision changed, inspect the diff and ensure no job is active before

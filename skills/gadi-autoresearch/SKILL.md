@@ -19,7 +19,7 @@ Use `$run-on-gadi` as the infrastructure authority. This skill owns the research
 6. Never compute on a login node or persistent-session host. Those hosts may edit, search, reason, compile small files, submit PBS, and monitor at most once per ten minutes.
 7. Never invoke raw `qsub` or `qdel` in an autonomous campaign. Use this skill's campaign CLI. A campaign approval is bounded permission, not unlimited cluster access.
 8. Never use `--dangerously-bypass-approvals-and-sandbox`, an infinite `--full-auto` loop, or a scheduler as a scientific reviewer.
-9. Never treat a coined name, cross-domain transfer, component bundle, or positive pilot as method novelty. Planning and method experiments require a hash-bound audit plus a controller-attested review from a fresh thread. Same-family review remains scientifically `provisional`.
+9. Never treat a coined name, cross-domain transfer, component bundle, or positive pilot as method novelty. A hard novelty rejection requires a checked functionally equivalent prior; individually known primitives or a hypothetical A+B composition are insufficient. Empirical uncertainty goes through a bounded `novelty_probe`, author rebuttal, and fresh third-thread arbitration. Planning and method experiments still require final hash-bound clearance. Same-family review remains scientifically `provisional`.
 10. Never silently downgrade the mission. A diagnostic, reproduction, or new application may inform discovery, but it can become the final paper only when `MISSION.json` explicitly permits that contribution.
 11. Never invent human judgments. When perceptual or preference evidence is required, publish one packed blinded study bundle, hand off to `waiting_human`, and continue only from real recorded evidence.
 
@@ -134,7 +134,7 @@ Use this ordered lifecycle; a pivot may return to an earlier phase only with a r
 1. `territory`: read the mission; map current primary literature, open code/data/models, research cells, and hard constraints in `RESEARCH_BRIEF.md` and `LITERATURE.md`. Do not choose an active idea yet.
 2. `discovery`: resolve at most a few promising adapter routes; use literature, formal tensions, and bounded `discovery`/`profile` probes to produce `DISCOVERY_REPORT.md` with reproducible observations and opportunity hypotheses.
 3. `portfolio`: write `CANDIDATE_PORTFOLIO.json`. Keep at least 3 viable candidates for broad exploration, 2 for directed exploration, or 1 for a fixed problem. Each needs a causal hypothesis, mechanism, predicted signature, falsifier, cheap distinguishing test, prior-work delta, and cost.
-4. `novelty_review`: promote one active candidate, write the bound `IDEA_REPORT.md` and `NOVELTY_AUDIT.json`, then hand off to `needs_novelty_review`. Only the controller's fresh reviewer writes `NOVELTY_REVIEW.json`. Rejection automatically returns to the portfolio or discovery; incompatible fallback claims cannot enter planning.
+4. `novelty_review`: promote one active candidate, write the bound `IDEA_REPORT.md` and `NOVELTY_AUDIT.json`, then hand off to `needs_novelty_review`. Only the controller's fresh reviewer writes `NOVELTY_REVIEW.json`. `clear_to_plan` opens planning; `exact_prior_reject` returns to portfolio/discovery; `conditional_probe` opens only a bounded distinguishing probe followed by `NOVELTY_REBUTTAL.json` and a fresh third-thread `NOVELTY_ARBITRATION.json`. Incompatible fallback claims cannot enter planning.
 5. `planning`: freeze datasets/splits/metrics/baselines/seeds, adapter-specific evidence, claim ceilings, human-study requirements, and stop/pivot rules.
 6. `implementation`: reuse credible bases, expose parameters, and keep source commits and compact outputs reproducible.
 7. `sanity`: run the smallest real witness for ground truth, imports, kernels, output marker, memory, jobfs, and file count.
@@ -160,7 +160,7 @@ Every experiment must declare:
 - a deterministic success file such as `metrics.json`
 - completed dependencies
 
-`discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Environment/data publication scripts may be previewed but not submitted before a mission-compatible novelty resolution. `baseline`, `audit`, and `paper` require that resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted by the mission; both registration and submission recheck every hash-bound gate.
+`discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Before final clearance, candidate-independent environment/data preparation is limited to one environment plus one dataset job, 500 SU total, and eight persistent entries; it still requires `allow_storage_publish`, the audited jobfs helper, one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, or packed data under `/g/data/wa66/Xiangyu/Data`. A `conditional_probe` review opens only `novelty_probe`: at most three attempts, 1,000 SU total (dynamically reduced for smaller campaigns), one GPU and four hours per job, and 32 persistent entries. `baseline`, `audit`, and `paper` require final resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted directly or by attested arbitration; both registration and submission recheck every hash-bound gate.
 
 Use `{RESULT_DIR}`, `{PBS_JOBFS}`, `{WORKSPACE}`, and `{DATA_ROOT}` placeholders in command arguments. The worker substitutes them without shell evaluation. `{RESULT_DIR}` is attempt-local jobfs staging during execution, not a direct gdata write path; compact output is validated and atomically published only after success.
 
@@ -193,8 +193,8 @@ bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN \
   --model gpt-5.6-sol --reasoning-effort ultra --start
 ```
 
-The controller applies these settings to both the resumable author and every fresh novelty
-reviewer thread. Record the exact launcher under the campaign root so a persistent-session
+The controller applies these settings to the resumable author and every fresh novelty reviewer
+and arbiter thread. Record the exact launcher under the campaign root so a persistent-session
 restart cannot silently fall back to different defaults.
 
 Run the second command only after connecting to the persistent host. The helper uses a clean no-profile tmux command so stale HOME startup references cannot leak into the controller. For an attended three-to-four-hour exploration, a foreground Codex `/goal` may drive the same campaign directly and use the interactive pane; still persist every experiment and handoff through `campaign.py`. Use the event-driven controller for queued or overnight work so Codex is invoked only when a decision is needed.
@@ -205,6 +205,7 @@ The first command previews. The second is permitted only after the campaign gran
 - polls PBS no more often than 600 seconds
 - invokes or resumes one `codex exec` turn only when action is needed
 - launches `needs_novelty_review` in a new non-resumed adversarial thread and attests that its thread ID differs from the author thread
+- preserves `conditional_probe` in `novelty_review`, enforces its job/SU/GPU/time/file caps, and launches `needs_novelty_arbitration` in a third non-resumed thread distinct from author and reviewer
 - returns rejected or mission-incompatible candidates to `portfolio` or `discovery` instead of silently changing the paper type
 - pauses if Codex exits without an explicit handoff
 - stores one bounded rotating log under the campaign root
@@ -226,10 +227,10 @@ Before every Codex turn exits, write exactly one control handoff:
   --reason "jobs 123 and 124 must finish before analysis"
 ```
 
-Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `waiting_human` for a real scientific/budget decision, `waiting_time` with `--wake-at`, `paused` for a safety problem, and `complete` only after the completion audit passes.
+Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `needs_novelty_arbitration` only after a conditional review, completed bound probes, and a registered `NOVELTY_REBUTTAL.json`; the author must never write the arbitration. Use `waiting_human` for a real scientific/budget decision, `waiting_time` with `--wake-at`, `paused` for a safety problem, and `complete` only after the completion audit passes.
 
 ## Completion Standard
 
-The goal is not complete because training ended or a PDF exists. Before `handoff --state complete`, inspect every required artifact and read [references/paper-completion.md](references/paper-completion.md). The CLI requires the mission, research brief, discovery report, candidate portfolio, idea report, novelty audit/review, research contract, experiment plan/ledger, results, experiment and claim audits, narrative report, paper source/PDF, citation audit, and final report. A route that requires human judgments also requires accepted `human_evaluation` evidence. Novelty artifacts must remain hash-bound and no more than 30 days old.
+The goal is not complete because training ended or a PDF exists. Before `handoff --state complete`, inspect every required artifact and read [references/paper-completion.md](references/paper-completion.md). The CLI requires the mission, research brief, discovery report, candidate portfolio, idea report, novelty audit/review, research contract, experiment plan/ledger, results, experiment and claim audits, narrative report, paper source/PDF, citation audit, and final report. A conditional path additionally requires the bound rebuttal and attested arbitration. A route that requires human judgments also requires accepted `human_evaluation` evidence. Novelty artifacts must remain hash-bound and no more than 30 days old.
 
 If only same-family semantic review was available, complete the campaign with `overall_assurance: provisional` and never call the paper submission-ready. Negative or inconclusive research may still produce an honest paper, but the title, abstract, claims, and limitations must match the evidence.

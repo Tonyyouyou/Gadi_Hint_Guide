@@ -80,7 +80,24 @@ HUMAN_EVALUATION_SCHEMA_VERSION = 2
 NOVELTY_SCHEMA_VERSION = 2
 NOVELTY_MAX_AGE_DAYS = 30
 NOVELTY_REQUIRED_STAGES = {"pilot", "main", "ablation"}
-NOVELTY_PASS_DECISIONS = {"plausibly_novel"}
+NOVELTY_PROBE_STAGE = "novelty_probe"
+NOVELTY_PASS_DECISIONS = {"plausibly_novel", "clear_to_plan"}
+NOVELTY_PROBE_DECISIONS = {"conditional_probe"}
+NOVELTY_HARD_REJECT_DECISIONS = {"exact_prior_reject"}
+NOVELTY_CURRENT_REVIEW_DECISIONS = {
+    "clear_to_plan",
+    "conditional_probe",
+    "exact_prior_reject",
+}
+NOVELTY_ARBITRATION_DECISIONS = {"clear_to_plan", "exact_prior_reject"}
+NOVELTY_PROBE_MAX_JOBS = 3
+NOVELTY_PROBE_MAX_SU = 1000.0
+NOVELTY_PROBE_MAX_WALLTIME_SECONDS = 4 * 3600
+NOVELTY_PROBE_MAX_GPUS_PER_JOB = 1
+NOVELTY_PROBE_MAX_PERSISTENT_ENTRIES = 32
+DISCOVERY_STORAGE_MAX_JOBS = 2
+DISCOVERY_STORAGE_MAX_SU = 500.0
+DISCOVERY_STORAGE_MAX_PERSISTENT_ENTRIES = 8
 NOVELTY_PRIMARY_CLAIMS = {
     "new_mechanism",
     "new_combination",
@@ -96,12 +113,16 @@ NOVELTY_PRIMARY_CLAIMS = {
 NOVELTY_FALLBACK_CLAIMS = {"new_application", "reproduction", "diagnostic"}
 NOVELTY_DIAGNOSTIC_DECISIONS = {
     "plausibly_novel",
+    "clear_to_plan",
     "derivative",
     "application_only",
     "reproduction_only",
 }
 NOVELTY_DECISIONS = {
     "plausibly_novel",
+    "clear_to_plan",
+    "conditional_probe",
+    "exact_prior_reject",
     "derivative",
     "application_only",
     "reproduction_only",
@@ -1159,6 +1180,8 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
             "thread_id": None,
             "novelty_review_thread_id": None,
             "novelty_review_requested_at": None,
+            "novelty_arbitration_thread_id": None,
+            "novelty_arbitration_requested_at": None,
             "agent_turns": 0,
             "last_agent_at": None,
             "last_pbs_poll_at": None,
@@ -1373,6 +1396,8 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
                 "idea_report",
                 "novelty_audit",
                 "novelty_review",
+                "novelty_rebuttal",
+                "novelty_arbitration",
                 "research_contract",
                 "experiment_plan",
                 "experiment_ledger",
@@ -1393,6 +1418,8 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
                 state["phase"] = "discovery"
         state["control"].setdefault("novelty_review_thread_id", None)
         state["control"].setdefault("novelty_review_requested_at", None)
+        state["control"].setdefault("novelty_arbitration_thread_id", None)
+        state["control"].setdefault("novelty_arbitration_requested_at", None)
         if state["status"] == "active" and state["control"]["state"] == "waiting_human":
             state["control"]["reason"] = (
                 "skill revision adopted; review migration requirements before explicit resume"
@@ -1510,6 +1537,8 @@ def cmd_route_set(args: argparse.Namespace) -> None:
             "idea_report",
             "novelty_audit",
             "novelty_review",
+            "novelty_rebuttal",
+            "novelty_arbitration",
             "research_contract",
             "experiment_plan",
             "experiment_ledger",
@@ -1526,7 +1555,14 @@ def cmd_route_set(args: argparse.Namespace) -> None:
             if state["artifacts"].pop(name, None) is not None:
                 invalidated.append(name)
         state.pop("research_track", None)
-        state["control"].update({"novelty_review_thread_id": None, "novelty_review_requested_at": None})
+        state["control"].update(
+            {
+                "novelty_review_thread_id": None,
+                "novelty_review_requested_at": None,
+                "novelty_arbitration_thread_id": None,
+                "novelty_arbitration_requested_at": None,
+            }
+        )
         add_history(
             state,
             "adapter_route_resolved",
@@ -1805,7 +1841,12 @@ def validate_novelty_audit(state: dict[str, Any], path: Path) -> dict[str, Any]:
     return audit
 
 
-def validate_novelty_review(state: dict[str, Any], path: Path) -> dict[str, Any]:
+def validate_novelty_review(
+    state: dict[str, Any],
+    path: Path,
+    *,
+    current_decisions_only: bool = False,
+) -> dict[str, Any]:
     review = json_object(path, "novelty review")
     if review.get("schema_version") != NOVELTY_SCHEMA_VERSION:
         raise CampaignError("unsupported novelty review schema")
@@ -1822,6 +1863,10 @@ def validate_novelty_review(state: dict[str, Any], path: Path) -> dict[str, Any]
     claim_class = require_text(review, "claim_class", "novelty_review")
     if decision not in NOVELTY_DECISIONS:
         raise CampaignError(f"unsupported novelty review decision: {decision}")
+    if current_decisions_only and decision not in NOVELTY_CURRENT_REVIEW_DECISIONS:
+        raise CampaignError(
+            "new cold reviews must decide clear_to_plan, conditional_probe, or exact_prior_reject"
+        )
     if claim_class not in NOVELTY_CLAIM_CLASSES:
         raise CampaignError(f"unsupported novelty review claim class: {claim_class}")
     if review.get("independent_context") is not True:
@@ -1870,10 +1915,34 @@ def validate_novelty_review(state: dict[str, Any], path: Path) -> dict[str, Any]
         value = review.get(key)
         if not isinstance(value, list):
             raise CampaignError(f"novelty_review.{key} must be a list")
+    exact_prior = priors["exact_combination"]
+    if decision in NOVELTY_PASS_DECISIONS:
+        if exact_prior.get("source_id") is not None:
+            raise CampaignError("a clear novelty decision cannot cite a functionally equivalent exact prior")
+        if review["blocking_overlaps"] or review["required_changes"]:
+            raise CampaignError("a clear novelty decision cannot retain blocking overlaps or required changes")
+    elif decision in NOVELTY_PROBE_DECISIONS:
+        if claim_class not in NOVELTY_PRIMARY_CLAIMS:
+            raise CampaignError("conditional_probe requires a primary contribution class")
+        if exact_prior.get("source_id") is not None:
+            raise CampaignError("conditional_probe is invalid after finding a functionally equivalent exact prior")
+        probe_plan = review.get("probe_plan")
+        if not isinstance(probe_plan, dict):
+            raise CampaignError("conditional_probe requires novelty_review.probe_plan")
+        for key in ("question", "naive_combination_baseline", "distinguishing_outcome", "falsifier"):
+            require_text(probe_plan, key, "novelty_review.probe_plan")
+    elif decision in NOVELTY_HARD_REJECT_DECISIONS:
+        if exact_prior.get("source_id") is None:
+            raise CampaignError("exact_prior_reject requires a checked exact-combination source")
+        if exact_prior.get("functionally_equivalent") is not True:
+            raise CampaignError("exact_prior_reject requires functionally_equivalent=true")
+        require_text(exact_prior, "equivalence_evidence", "novelty_review.prior_checks.exact_combination")
     return review
 
 
-def novelty_resolution(state: dict[str, Any], *, require_primary: bool = False) -> str:
+def attested_novelty_review(
+    state: dict[str, Any],
+) -> tuple[Path, dict[str, Any], Path, dict[str, Any]]:
     audit_path = artifact_file(state, "novelty_audit")
     audit = validate_novelty_audit(state, audit_path)
     review_path = artifact_file(state, "novelty_review")
@@ -1896,16 +1965,293 @@ def novelty_resolution(state: dict[str, Any], *, require_primary: bool = False) 
         raise CampaignError("cold-review attestation reused the author thread")
     if audit["candidate_id"] != review["candidate_id"]:
         raise CampaignError("novelty audit and review candidate ids differ")
-    if review["blocking_overlaps"] or review["required_changes"]:
-        raise CampaignError("novelty review has unresolved blocking overlaps or required changes")
+    return audit_path, audit, review_path, review
+
+
+def novelty_probe_limits(state: dict[str, Any]) -> dict[str, int | float]:
+    approval = state["approval"]
+    approved_su = float(approval["max_su"])
+    return {
+        "max_jobs": min(NOVELTY_PROBE_MAX_JOBS, int(approval["max_jobs"])),
+        "max_su": round(
+            min(approved_su, NOVELTY_PROBE_MAX_SU, max(50.0, approved_su * 0.01)),
+            2,
+        ),
+        "max_walltime_seconds": min(
+            NOVELTY_PROBE_MAX_WALLTIME_SECONDS,
+            int(approval["max_batch_walltime_seconds"]),
+        ),
+        "max_gpus_per_job": min(
+            NOVELTY_PROBE_MAX_GPUS_PER_JOB,
+            int(approval["max_gpus_per_job"]),
+        ),
+        "max_persistent_entries": min(
+            NOVELTY_PROBE_MAX_PERSISTENT_ENTRIES,
+            max(1, int(approval["max_persistent_files"]) - CAMPAIGN_ENTRY_RESERVE),
+        ),
+    }
+
+
+def current_probe_binding(state: dict[str, Any]) -> dict[str, str]:
+    route = validate_route(state)
+    portfolio_path = artifact_file(state, "candidate_portfolio")
+    portfolio = validate_candidate_portfolio(state, portfolio_path)
+    idea_path = artifact_file(state, "idea_report")
+    audit_path, audit, review_path, review = attested_novelty_review(state)
+    if review["decision"] not in NOVELTY_PROBE_DECISIONS:
+        raise CampaignError("the cold novelty review did not authorize a conditional probe")
+    if review["claim_class"] not in NOVELTY_PRIMARY_CLAIMS:
+        raise CampaignError("conditional novelty probes require a primary contribution class")
+    if review["claim_class"] not in set(state["mission"]["acceptable_contributions"]):
+        raise CampaignError("the conditional contribution class is outside the mission")
+    if audit["candidate_id"] != portfolio["active_candidate_id"]:
+        raise CampaignError("conditional novelty review is not bound to the active candidate")
+    return {
+        "mission_sha256": state["mission_sha256"],
+        "route_sha256": route["sha256"],
+        "candidate_portfolio_sha256": sha256_file(portfolio_path),
+        "active_candidate_id": portfolio["active_candidate_id"],
+        "idea_report_sha256": sha256_file(idea_path),
+        "novelty_audit_sha256": sha256_file(audit_path),
+        "novelty_review_sha256": sha256_file(review_path),
+        "claim_class": review["claim_class"],
+        "clearance": "conditional_probe",
+    }
+
+
+def novelty_probe_experiments(
+    state: dict[str, Any], binding: dict[str, str]
+) -> list[dict[str, Any]]:
+    return [
+        experiment
+        for experiment in state["experiments"].values()
+        if experiment.get("stage") == NOVELTY_PROBE_STAGE
+        and experiment.get("claim_binding") == binding
+    ]
+
+
+def validate_novelty_probe_registration(
+    state: dict[str, Any], experiment: dict[str, Any]
+) -> None:
+    binding = current_probe_binding(state)
+    if experiment.get("claim_binding") != binding:
+        raise CampaignError("novelty probe is not bound to the current conditional review")
+    limits = novelty_probe_limits(state)
+    resources = experiment["resources"]
+    if int(resources["ngpus"]) > int(limits["max_gpus_per_job"]):
+        raise CampaignError("novelty probes are limited to one GPU per job")
+    if int(resources["walltime_seconds"]) > int(limits["max_walltime_seconds"]):
+        raise CampaignError("novelty probe walltime exceeds the conditional-review limit")
+    probes = novelty_probe_experiments(state, binding)
+    if len(probes) + 1 > int(limits["max_jobs"]):
+        raise CampaignError("conditional novelty review allows at most three probe jobs")
+    reserved_su = sum(float(item["max_su"]) for item in probes) + float(experiment["max_su"])
+    if reserved_su > float(limits["max_su"]) + 1e-9:
+        raise CampaignError("novelty probes exceed the conditional-review SU limit")
+
+    def declared_entries(item: dict[str, Any]) -> int:
+        overhead = 2 if item.get("mode") == "batch" else 1
+        return int(item["expected_files"]) + overhead
+
+    reserved_entries = sum(declared_entries(item) for item in probes)
+    reserved_entries += declared_entries(experiment)
+    if reserved_entries > int(limits["max_persistent_entries"]):
+        raise CampaignError("novelty probes exceed the conditional-review persistent-entry limit")
+
+
+def validate_novelty_probe_submission(state: dict[str, Any], experiment: dict[str, Any]) -> None:
+    binding = current_probe_binding(state)
+    if experiment.get("claim_binding") != binding:
+        raise CampaignError("novelty probe is bound to a different conditional review")
+    limits = novelty_probe_limits(state)
+    probes = novelty_probe_experiments(state, binding)
+    attempts = [attempt for item in probes for attempt in item.get("attempts", [])]
+    if len(attempts) + 1 > int(limits["max_jobs"]):
+        raise CampaignError("conditional novelty review job-attempt limit is exhausted")
+    committed = sum(float(attempt.get("max_su", 0.0)) for attempt in attempts)
+    if committed + float(experiment["max_su"]) > float(limits["max_su"]) + 1e-9:
+        raise CampaignError("conditional novelty review SU limit is exhausted")
+
+
+def validate_novelty_rebuttal(state: dict[str, Any], path: Path) -> dict[str, Any]:
+    rebuttal = json_object(path, "novelty rebuttal")
+    if rebuttal.get("schema_version") != NOVELTY_SCHEMA_VERSION:
+        raise CampaignError("unsupported novelty rebuttal schema")
+    audit_path, audit, review_path, review = attested_novelty_review(state)
+    if review["decision"] not in NOVELTY_PROBE_DECISIONS:
+        raise CampaignError("a novelty rebuttal is valid only after conditional_probe")
+    if require_text(rebuttal, "candidate_id", "novelty_rebuttal") != audit["candidate_id"]:
+        raise CampaignError("novelty rebuttal candidate does not match the current audit")
+    if require_text(rebuttal, "audit_sha256", "novelty_rebuttal") != sha256_file(audit_path):
+        raise CampaignError("novelty rebuttal is not bound to the current audit")
+    if require_text(rebuttal, "review_sha256", "novelty_rebuttal") != sha256_file(review_path):
+        raise CampaignError("novelty rebuttal is not bound to the current cold review")
+    written_at = recent_timestamp(rebuttal.get("written_at"), "novelty_rebuttal.written_at")
+    if written_at + dt.timedelta(minutes=5) < parse_time(review["reviewed_at"]):
+        raise CampaignError("novelty rebuttal predates the review it answers")
+    if rebuttal.get("author_position") != "advance":
+        raise CampaignError("novelty rebuttal must explicitly set author_position=advance")
+    require_text(rebuttal, "naive_combination_baseline", "novelty_rebuttal")
+    require_text(rebuttal, "distinguishing_result", "novelty_rebuttal")
+    remaining_risks = rebuttal.get("remaining_risks")
+    if not isinstance(remaining_risks, list):
+        raise CampaignError("novelty_rebuttal.remaining_risks must be a list")
+
+    experiment_ids = require_nonempty_list(rebuttal, "probe_experiment_ids", "novelty_rebuttal")
+    if (
+        len(experiment_ids) > NOVELTY_PROBE_MAX_JOBS
+        or len(set(experiment_ids)) != len(experiment_ids)
+        or not all(isinstance(item, str) and item for item in experiment_ids)
+    ):
+        raise CampaignError("novelty_rebuttal.probe_experiment_ids must contain one to three unique ids")
+    binding = current_probe_binding(state)
+    probe_results = require_nonempty_list(rebuttal, "probe_results", "novelty_rebuttal")
+    result_ids: set[str] = set()
+    for index, result in enumerate(probe_results):
+        label = f"novelty_rebuttal.probe_results[{index}]"
+        if not isinstance(result, dict):
+            raise CampaignError(f"{label} must be an object")
+        experiment_id = require_text(result, "experiment_id", label)
+        if experiment_id in result_ids:
+            raise CampaignError(f"duplicate novelty rebuttal experiment: {experiment_id}")
+        result_ids.add(experiment_id)
+        experiment = state["experiments"].get(experiment_id)
+        if not experiment or experiment.get("stage") != NOVELTY_PROBE_STAGE:
+            raise CampaignError(f"novelty rebuttal references a non-probe experiment: {experiment_id}")
+        if experiment.get("claim_binding") != binding:
+            raise CampaignError(f"novelty rebuttal probe has stale lineage: {experiment_id}")
+        if experiment_status(experiment) != "completed":
+            raise CampaignError(f"novelty rebuttal probe is not completed: {experiment_id}")
+        success_file = canonical(experiment["success_file"], strict=True)
+        if not success_file.is_file():
+            raise CampaignError(f"novelty rebuttal probe success marker is missing: {experiment_id}")
+        if require_text(result, "success_file_sha256", label) != sha256_file(success_file):
+            raise CampaignError(f"novelty rebuttal probe hash mismatch: {experiment_id}")
+        require_text(result, "finding", label)
+    if set(experiment_ids) != result_ids:
+        raise CampaignError("novelty rebuttal probe results do not match probe_experiment_ids")
+
+    objections = require_nonempty_list(rebuttal, "reviewer_objections", "novelty_rebuttal")
+    for index, objection in enumerate(objections):
+        label = f"novelty_rebuttal.reviewer_objections[{index}]"
+        if not isinstance(objection, dict):
+            raise CampaignError(f"{label} must be an object")
+        require_text(objection, "objection", label)
+        require_text(objection, "response", label)
+        evidence_ids = objection.get("evidence_experiment_ids")
+        if not isinstance(evidence_ids, list) or not evidence_ids or any(
+            item not in result_ids for item in evidence_ids
+        ):
+            raise CampaignError(f"{label}.evidence_experiment_ids must reference completed probes")
+    return rebuttal
+
+
+def validate_novelty_arbitration(state: dict[str, Any], path: Path) -> dict[str, Any]:
+    arbitration = json_object(path, "novelty arbitration")
+    if arbitration.get("schema_version") != NOVELTY_SCHEMA_VERSION:
+        raise CampaignError("unsupported novelty arbitration schema")
+    audit_path, audit, review_path, review = attested_novelty_review(state)
+    if review["decision"] not in NOVELTY_PROBE_DECISIONS:
+        raise CampaignError("novelty arbitration is valid only after conditional_probe")
+    rebuttal_path = artifact_file(state, "novelty_rebuttal")
+    validate_novelty_rebuttal(state, rebuttal_path)
+    if require_text(arbitration, "candidate_id", "novelty_arbitration") != audit["candidate_id"]:
+        raise CampaignError("novelty arbitration candidate does not match the current audit")
+    bindings = {
+        "audit_sha256": sha256_file(audit_path),
+        "review_sha256": sha256_file(review_path),
+        "rebuttal_sha256": sha256_file(rebuttal_path),
+    }
+    for key, expected in bindings.items():
+        if require_text(arbitration, key, "novelty_arbitration") != expected:
+            raise CampaignError(f"novelty arbitration is not bound to the current {key[:-7]}")
+    arbitrated_at = recent_timestamp(
+        arbitration.get("arbitrated_at"), "novelty_arbitration.arbitrated_at"
+    )
+    if arbitrated_at + dt.timedelta(minutes=5) < parse_time(
+        json_object(rebuttal_path, "novelty rebuttal")["written_at"]
+    ):
+        raise CampaignError("novelty arbitration predates the rebuttal it assesses")
+    if arbitration.get("independent_context") is not True:
+        raise CampaignError("novelty arbitration must declare independent_context=true")
+    decision = require_text(arbitration, "decision", "novelty_arbitration")
+    if decision not in NOVELTY_ARBITRATION_DECISIONS:
+        raise CampaignError(f"unsupported novelty arbitration decision: {decision}")
+    claim_class = require_text(arbitration, "claim_class", "novelty_arbitration")
+    if claim_class not in NOVELTY_CLAIM_CLASSES:
+        raise CampaignError(f"unsupported novelty arbitration claim class: {claim_class}")
+    for key in (
+        "probe_validity_assessment",
+        "naive_combination_assessment",
+        "non_obvious_interaction_assessment",
+        "paper_contribution_assessment",
+    ):
+        require_text(arbitration, key, "novelty_arbitration")
+    for key in ("blocking_issues", "required_changes"):
+        if not isinstance(arbitration.get(key), list):
+            raise CampaignError(f"novelty_arbitration.{key} must be a list")
+    exact_prior = arbitration.get("exact_prior")
+    if decision == "clear_to_plan":
+        if claim_class not in NOVELTY_PRIMARY_CLAIMS:
+            raise CampaignError("clear_to_plan arbitration requires a primary contribution class")
+        if claim_class not in set(state["mission"]["acceptable_contributions"]):
+            raise CampaignError("arbitrated contribution class is outside the mission")
+        if arbitration["blocking_issues"] or arbitration["required_changes"]:
+            raise CampaignError("clear_to_plan arbitration cannot retain blocking issues")
+        if exact_prior is not None:
+            raise CampaignError("clear_to_plan arbitration cannot identify an exact prior")
+    else:
+        if not isinstance(exact_prior, dict):
+            raise CampaignError("exact_prior_reject arbitration requires exact_prior evidence")
+        for key in ("title", "url", "checked_locator", "equivalence_evidence"):
+            require_text(exact_prior, key, "novelty_arbitration.exact_prior")
+        if not re.match(r"^https?://", exact_prior["url"]):
+            raise CampaignError("novelty_arbitration.exact_prior.url must be HTTP(S)")
+        if exact_prior.get("primary_source") is not True or exact_prior.get("full_text_checked") is not True:
+            raise CampaignError("exact prior rejection requires a checked primary source")
+        if exact_prior.get("functionally_equivalent") is not True:
+            raise CampaignError("exact prior rejection requires functionally_equivalent=true")
+    return arbitration
+
+
+def novelty_resolution(state: dict[str, Any], *, require_primary: bool = False) -> str:
+    _, _, _, review = attested_novelty_review(state)
     claim_class = review["claim_class"]
     acceptable = set(state["mission"]["acceptable_contributions"])
     if review["decision"] in NOVELTY_PASS_DECISIONS and claim_class in NOVELTY_PRIMARY_CLAIMS:
+        if review["blocking_overlaps"] or review["required_changes"]:
+            raise CampaignError("novelty review has unresolved blocking overlaps or required changes")
         if claim_class not in acceptable:
             raise CampaignError(
                 f"novelty review permits {claim_class}, but the mission does not accept that contribution"
             )
         return claim_class
+    if review["decision"] in NOVELTY_PROBE_DECISIONS:
+        rebuttal_path = artifact_file(state, "novelty_rebuttal")
+        validate_novelty_rebuttal(state, rebuttal_path)
+        arbitration_path = artifact_file(state, "novelty_arbitration")
+        arbitration = validate_novelty_arbitration(state, arbitration_path)
+        record = state["artifacts"]["novelty_arbitration"]
+        thread_ids = {
+            record.get("arbiter_thread_id"),
+            record.get("author_thread_id"),
+            record.get("review_thread_id"),
+        }
+        if (
+            not record.get("cold_arbitration")
+            or not record.get("arbiter_thread_id")
+            or len(thread_ids) != 3
+            or None in thread_ids
+        ):
+            raise CampaignError("novelty arbitration lacks an independent controller attestation")
+        if record.get("reviewed_rebuttal_sha256") != sha256_file(rebuttal_path):
+            raise CampaignError("novelty arbitration attestation does not match the current rebuttal")
+        requested_at = state["control"].get("novelty_arbitration_requested_at")
+        if requested_at and parse_time(record["recorded_at"]) < parse_time(requested_at):
+            raise CampaignError("novelty arbitration predates the latest arbitration request")
+        if arbitration["decision"] == "clear_to_plan":
+            return arbitration["claim_class"]
+        raise CampaignError("independent novelty arbitration found a functionally equivalent exact prior")
     if review["decision"] in NOVELTY_DIAGNOSTIC_DECISIONS and claim_class in NOVELTY_FALLBACK_CLAIMS:
         if (
             require_primary
@@ -1926,6 +2272,9 @@ def novelty_resolution(state: dict[str, Any], *, require_primary: bool = False) 
 def require_experiment_novelty(state: dict[str, Any], stage: str) -> None:
     if stage in {"sanity", "profile", "discovery"}:
         return
+    if stage == NOVELTY_PROBE_STAGE:
+        current_probe_binding(state)
+        return
     if stage in NOVELTY_REQUIRED_STAGES:
         novelty_resolution(state, require_primary=True)
         return
@@ -1940,8 +2289,9 @@ def current_claim_binding(state: dict[str, Any]) -> dict[str, str]:
     audit_path = artifact_file(state, "novelty_audit")
     validate_novelty_audit(state, audit_path)
     review_path = artifact_file(state, "novelty_review")
+    review = validate_novelty_review(state, review_path)
     claim_class = novelty_resolution(state)
-    return {
+    binding = {
         "mission_sha256": state["mission_sha256"],
         "route_sha256": route["sha256"],
         "candidate_portfolio_sha256": sha256_file(portfolio_path),
@@ -1951,20 +2301,35 @@ def current_claim_binding(state: dict[str, Any]) -> dict[str, str]:
         "novelty_review_sha256": sha256_file(review_path),
         "claim_class": claim_class,
     }
+    if review["decision"] in NOVELTY_PROBE_DECISIONS:
+        rebuttal_path = artifact_file(state, "novelty_rebuttal")
+        arbitration_path = artifact_file(state, "novelty_arbitration")
+        binding.update(
+            {
+                "novelty_rebuttal_sha256": sha256_file(rebuttal_path),
+                "novelty_arbitration_sha256": sha256_file(arbitration_path),
+            }
+        )
+    return binding
 
 
 def require_experiment_claim_binding(state: dict[str, Any], experiment: dict[str, Any]) -> None:
     if experiment["stage"] in {"sanity", "profile", "discovery"}:
         return
-    if experiment.get("claim_binding") != current_claim_binding(state):
+    expected = (
+        current_probe_binding(state)
+        if experiment["stage"] == NOVELTY_PROBE_STAGE
+        else current_claim_binding(state)
+    )
+    if experiment.get("claim_binding") != expected:
         raise CampaignError(
             "experiment is bound to a different candidate or novelty lineage; register a new experiment"
         )
 
 
 def require_author_control(state: dict[str, Any], action: str) -> None:
-    if state["control"]["state"] == "novelty_reviewer_running":
-        raise CampaignError(f"the cold novelty reviewer cannot {action}")
+    if state["control"]["state"] in {"novelty_reviewer_running", "novelty_arbiter_running"}:
+        raise CampaignError(f"the independent novelty evaluator cannot {action}")
 
 
 def require_phase_entry(state: dict[str, Any], phase: str) -> None:
@@ -2038,7 +2403,17 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             raise CampaignError("the mission is immutable after initialization; create a new campaign to change it")
         if state["control"]["state"] == "novelty_reviewer_running" and args.name != "novelty_review":
             raise CampaignError("the cold novelty reviewer may record only novelty_review")
-        if args.name in {"candidate_portfolio", "idea_report", "novelty_audit", "novelty_review"}:
+        if state["control"]["state"] == "novelty_arbiter_running" and args.name != "novelty_arbitration":
+            raise CampaignError("the independent novelty arbiter may record only novelty_arbitration")
+        novelty_artifacts = {
+            "candidate_portfolio",
+            "idea_report",
+            "novelty_audit",
+            "novelty_review",
+            "novelty_rebuttal",
+            "novelty_arbitration",
+        }
+        if args.name in novelty_artifacts:
             active_claim_jobs = [
                 experiment_id
                 for experiment_id, experiment in state["experiments"].items()
@@ -2087,6 +2462,8 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             downstream = [
                 "novelty_audit",
                 "novelty_review",
+                "novelty_rebuttal",
+                "novelty_arbitration",
                 "research_contract",
                 "experiment_plan",
                 "human_evaluation",
@@ -2095,19 +2472,57 @@ def cmd_artifact(args: argparse.Namespace) -> None:
                 downstream.insert(0, "idea_report")
             for name in downstream:
                 state["artifacts"].pop(name, None)
+        if args.name == "idea_report":
+            previous_idea = state["artifacts"].get("idea_report")
+            if state["artifacts"].get("novelty_audit") and (
+                not previous_idea or previous_idea.get("sha256") != sha256_file(path)
+            ):
+                for name in (
+                    "novelty_audit",
+                    "novelty_review",
+                    "novelty_rebuttal",
+                    "novelty_arbitration",
+                    "research_contract",
+                    "experiment_plan",
+                    "human_evaluation",
+                ):
+                    state["artifacts"].pop(name, None)
         if args.name == "novelty_audit":
             if path.suffix != ".json" or args.assurance != "provisional":
                 raise CampaignError("novelty_audit must be a provisional JSON artifact")
             validate_novelty_audit(state, path)
             previous_audit = state["artifacts"].get("novelty_audit")
-            if previous_audit and previous_audit.get("sha256") != sha256_file(path):
-                state["artifacts"].pop("human_evaluation", None)
+            if state["artifacts"].get("novelty_review") and (
+                not previous_audit or previous_audit.get("sha256") != sha256_file(path)
+            ):
+                for name in (
+                    "novelty_review",
+                    "novelty_rebuttal",
+                    "novelty_arbitration",
+                    "human_evaluation",
+                ):
+                    state["artifacts"].pop(name, None)
         if args.name == "novelty_review":
             if path.suffix != ".json" or args.assurance != "provisional":
                 raise CampaignError("controller-launched same-family novelty_review must be provisional JSON")
             if state["control"]["state"] != "novelty_reviewer_running":
                 raise CampaignError("novelty_review may be recorded only by the controller's fresh reviewer")
-            validate_novelty_review(state, path)
+            validate_novelty_review(state, path, current_decisions_only=True)
+            state["artifacts"].pop("novelty_rebuttal", None)
+            state["artifacts"].pop("novelty_arbitration", None)
+        if args.name == "novelty_rebuttal":
+            if path.suffix != ".json" or args.assurance != "provisional":
+                raise CampaignError("novelty_rebuttal must be a provisional JSON artifact")
+            if state["control"]["state"] != "needs_agent" or state["phase"] != "novelty_review":
+                raise CampaignError("the author may record novelty_rebuttal only during conditional novelty review")
+            validate_novelty_rebuttal(state, path)
+            state["artifacts"].pop("novelty_arbitration", None)
+        if args.name == "novelty_arbitration":
+            if path.suffix != ".json" or args.assurance != "provisional":
+                raise CampaignError("novelty_arbitration must be a provisional JSON artifact")
+            if state["control"]["state"] != "novelty_arbiter_running":
+                raise CampaignError("novelty_arbitration may be recorded only by the controller's fresh arbiter")
+            validate_novelty_arbitration(state, path)
         if args.name == "human_evaluation":
             if path.suffix != ".json" or args.assurance != "accepted":
                 raise CampaignError("human_evaluation must be an accepted JSON artifact")
@@ -2172,7 +2587,11 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         claim_binding = (
             None
             if args.stage in {"sanity", "profile", "discovery"}
-            else current_claim_binding(state)
+            else (
+                current_probe_binding(state)
+                if args.stage == NOVELTY_PROBE_STAGE
+                else current_claim_binding(state)
+            )
         )
         if args.id in state["experiments"]:
             raise CampaignError(f"experiment already exists: {args.id}")
@@ -2226,6 +2645,8 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             "claim_binding": claim_binding,
             "attempts": [],
         }
+        if args.stage == NOVELTY_PROBE_STAGE:
+            validate_novelty_probe_registration(state, experiment)
         current_budget = budget_summary(state)
         new_overhead = 2 if args.mode == "batch" else 1
         projected = (
@@ -2332,6 +2753,8 @@ def cmd_submit(args: argparse.Namespace) -> None:
         raise CampaignError("use the interactive command for interactive experiments")
     require_experiment_novelty(state, experiment["stage"])
     require_experiment_claim_binding(state, experiment)
+    if experiment["stage"] == NOVELTY_PROBE_STAGE:
+        validate_novelty_probe_submission(state, experiment)
     if experiment_status(experiment) not in {"planned", "failed", "failed_submission", "cancelled"}:
         raise CampaignError(f"experiment cannot be submitted from status {experiment_status(experiment)}")
     require_dependencies(state, experiment)
@@ -2381,6 +2804,8 @@ def cmd_submit(args: argparse.Namespace) -> None:
             raise CampaignError(f"experiment cannot be submitted from current status {current_status}")
         require_experiment_novelty(current, current_exp["stage"])
         require_experiment_claim_binding(current, current_exp)
+        if current_exp["stage"] == NOVELTY_PROBE_STAGE:
+            validate_novelty_probe_submission(current, current_exp)
         require_dependencies(current, current_exp)
         require_registered_inputs(current, current_exp)
         validate_resources(current_exp["resources"], current["approval"], "batch")
@@ -2421,6 +2846,51 @@ def pbs_output_path(script: str) -> Path:
     if not output.is_absolute():
         raise CampaignError("external PBS output path must be absolute")
     return canonical(output)
+
+
+def discovery_storage_limits(state: dict[str, Any]) -> dict[str, int | float]:
+    return {
+        "max_jobs": min(DISCOVERY_STORAGE_MAX_JOBS, int(state["approval"]["max_jobs"])),
+        "max_su": min(DISCOVERY_STORAGE_MAX_SU, float(state["approval"]["max_su"])),
+        "max_persistent_entries": min(
+            DISCOVERY_STORAGE_MAX_PERSISTENT_ENTRIES,
+            max(1, int(state["approval"]["max_persistent_files"]) - CAMPAIGN_ENTRY_RESERVE),
+        ),
+    }
+
+
+def validate_discovery_storage_job(state: dict[str, Any], external: dict[str, Any]) -> None:
+    if state["phase"] not in {"territory", "discovery", "portfolio", "novelty_review"}:
+        raise CampaignError("candidate-independent storage preparation is allowed only before planning")
+    existing = [
+        experiment
+        for experiment in state["experiments"].values()
+        if experiment.get("mode") == "external"
+        and experiment.get("clearance") in {None, "discovery_infrastructure"}
+    ]
+    if any(item.get("stage") == external["stage"] for item in existing):
+        raise CampaignError(
+            f"candidate-independent discovery permits only one {external['stage']} storage job"
+        )
+    limits = discovery_storage_limits(state)
+    if len(existing) + 1 > int(limits["max_jobs"]):
+        raise CampaignError("candidate-independent discovery storage job limit is exhausted")
+    reserved_su = sum(float(item["max_su"]) for item in existing) + float(external["max_su"])
+    if reserved_su > float(limits["max_su"]) + 1e-9:
+        raise CampaignError("candidate-independent discovery storage SU limit is exhausted")
+    entries = sum(int(item["expected_files"]) + 1 for item in existing)
+    entries += int(external["expected_files"]) + 1
+    if entries > int(limits["max_persistent_entries"]):
+        raise CampaignError("candidate-independent discovery storage entry limit is exhausted")
+
+
+def external_storage_clearance(state: dict[str, Any], external: dict[str, Any]) -> str:
+    try:
+        novelty_resolution(state)
+    except CampaignError:
+        validate_discovery_storage_job(state, external)
+        return "discovery_infrastructure"
+    return "novelty_cleared"
 
 
 def cmd_external_submit(args: argparse.Namespace) -> None:
@@ -2469,7 +2939,6 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
     require_author_control(state, "submit external storage jobs")
     if args.execute:
         require_approved(state, "allow_storage_publish")
-        novelty_resolution(state)
     if args.id in state["experiments"]:
         raise CampaignError(f"experiment already exists: {args.id}")
     output_path = pbs_output_path(script)
@@ -2505,6 +2974,8 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
         "depends_on": [],
         "attempts": [],
     }
+    if args.execute:
+        external["clearance"] = external_storage_clearance(state, external)
     ensure_submission_budget(state, external)
     preflight = live_preflight(state, resources["project"])
     if preflight["projects"][0]["available_su"] < external["max_su"]:
@@ -2540,9 +3011,9 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
         require_current_skill(current)
         pin_missing_skill_reference(current)
         require_author_control(current, "submit external storage jobs")
-        novelty_resolution(current)
         if args.id in current["experiments"]:
             raise CampaignError(f"experiment already exists: {args.id}")
+        external["clearance"] = external_storage_clearance(current, external)
         validate_resources(external["resources"], current["approval"], "batch")
         ensure_submission_budget(current, external)
         current["experiments"][args.id] = external
@@ -2597,6 +3068,8 @@ def cmd_interactive(args: argparse.Namespace) -> None:
         raise CampaignError(f"unknown interactive experiment: {args.id}")
     require_experiment_novelty(state, experiment["stage"])
     require_experiment_claim_binding(state, experiment)
+    if experiment["stage"] == NOVELTY_PROBE_STAGE:
+        validate_novelty_probe_submission(state, experiment)
     if experiment_status(experiment) not in {"planned", "failed", "failed_submission", "cancelled"}:
         raise CampaignError(f"interactive experiment cannot start from {experiment_status(experiment)}")
     require_dependencies(state, experiment)
@@ -2651,6 +3124,8 @@ def cmd_interactive(args: argparse.Namespace) -> None:
             raise CampaignError(f"interactive experiment cannot start from current status {current_status}")
         require_experiment_novelty(current, current_exp["stage"])
         require_experiment_claim_binding(current, current_exp)
+        if current_exp["stage"] == NOVELTY_PROBE_STAGE:
+            validate_novelty_probe_submission(current, current_exp)
         require_dependencies(current, current_exp)
         require_registered_inputs(current, current_exp)
         validate_resources(current_exp["resources"], current["approval"], "interactive")
@@ -3295,6 +3770,13 @@ def cmd_worker_run(args: argparse.Namespace) -> None:
 
 def required_completion_artifacts(state: dict[str, Any]) -> tuple[str, ...]:
     required = list(REQUIRED_COMPLETION_ARTIFACTS)
+    review_record = state.get("artifacts", {}).get("novelty_review")
+    if review_record:
+        review_path = canonical(review_record["path"])
+        if review_path.is_file():
+            review = json_object(review_path, "novelty review")
+            if review.get("decision") in NOVELTY_PROBE_DECISIONS:
+                required.extend(("novelty_rebuttal", "novelty_arbitration"))
     route = validate_route(state)
     if route["human_evaluation"] == "required":
         required.append("human_evaluation")
@@ -3353,12 +3835,13 @@ def cmd_handoff(args: argparse.Namespace) -> None:
     with locked_state(args.root) as state:
         allow_expired = args.state in {"waiting_pbs", "waiting_human", "paused", "stopped", "complete"}
         require_approved(state, allow_expired=allow_expired)
-        if state["control"]["state"] == "novelty_reviewer_running" and args.state not in {
+        evaluator = state["control"]["state"]
+        if evaluator in {"novelty_reviewer_running", "novelty_arbiter_running"} and args.state not in {
             "needs_agent",
             "waiting_human",
             "paused",
         }:
-            raise CampaignError("the cold novelty reviewer may hand off only to the author, human, or pause")
+            raise CampaignError("an independent novelty evaluator may hand off only to the author, human, or pause")
         if args.state not in {"waiting_human", "paused", "stopped"}:
             require_current_skill(state)
             pin_missing_skill_reference(state)
@@ -3367,16 +3850,45 @@ def cmd_handoff(args: argparse.Namespace) -> None:
                 raise CampaignError("enter the novelty_review phase before requesting a cold review")
             validate_novelty_audit(state, artifact_file(state, "novelty_audit"))
             previous_review = state["artifacts"].pop("novelty_review", None)
+            previous_rebuttal = state["artifacts"].pop("novelty_rebuttal", None)
+            previous_arbitration = state["artifacts"].pop("novelty_arbitration", None)
             state["control"]["novelty_review_requested_at"] = utc_now()
+            state["control"].update(
+                {
+                    "novelty_arbitration_thread_id": None,
+                    "novelty_arbitration_requested_at": None,
+                }
+            )
             add_history(
                 state,
                 "novelty_review_requested",
                 invalidated_review_sha256=(previous_review or {}).get("sha256"),
+                invalidated_rebuttal_sha256=(previous_rebuttal or {}).get("sha256"),
+                invalidated_arbitration_sha256=(previous_arbitration or {}).get("sha256"),
+            )
+        if args.state == "needs_novelty_arbitration":
+            if state["phase"] != "novelty_review":
+                raise CampaignError("novelty arbitration may be requested only in novelty_review")
+            _, _, _, review = attested_novelty_review(state)
+            if review["decision"] not in NOVELTY_PROBE_DECISIONS:
+                raise CampaignError("novelty arbitration requires a conditional_probe cold review")
+            rebuttal_path = artifact_file(state, "novelty_rebuttal")
+            validate_novelty_rebuttal(state, rebuttal_path)
+            previous_arbitration = state["artifacts"].pop("novelty_arbitration", None)
+            state["control"]["novelty_arbitration_requested_at"] = utc_now()
+            add_history(
+                state,
+                "novelty_arbitration_requested",
+                rebuttal_sha256=sha256_file(rebuttal_path),
+                invalidated_arbitration_sha256=(previous_arbitration or {}).get("sha256"),
             )
         if (
             args.state == "needs_agent"
             and state["phase"] == "novelty_review"
-            and state["control"]["state"] != "novelty_reviewer_running"
+            and state["control"]["state"] not in {
+                "novelty_reviewer_running",
+                "novelty_arbiter_running",
+            }
         ):
             novelty_resolution(state)
         control = state["control"]
@@ -3529,7 +4041,22 @@ def build_parser() -> argparse.ArgumentParser:
     experiment = sub.add_parser("experiment-add", help="register a structured interactive or batch experiment")
     experiment.add_argument("root")
     experiment.add_argument("--id", required=True)
-    experiment.add_argument("--stage", choices=("discovery", "sanity", "profile", "pilot", "baseline", "main", "ablation", "audit", "paper"), required=True)
+    experiment.add_argument(
+        "--stage",
+        choices=(
+            "discovery",
+            "sanity",
+            "profile",
+            NOVELTY_PROBE_STAGE,
+            "pilot",
+            "baseline",
+            "main",
+            "ablation",
+            "audit",
+            "paper",
+        ),
+        required=True,
+    )
     experiment.add_argument("--mode", choices=("interactive", "batch"), required=True)
     experiment.add_argument("--queue", required=True)
     experiment.add_argument("--project", required=True)
@@ -3602,7 +4129,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     handoff = sub.add_parser("handoff", help="persist the controller's next action, pause, stop, or completion")
     handoff.add_argument("root")
-    handoff.add_argument("--state", choices=("needs_agent", "needs_novelty_review", "waiting_pbs", "waiting_human", "waiting_time", "paused", "stopped", "complete"), required=True)
+    handoff.add_argument(
+        "--state",
+        choices=(
+            "needs_agent",
+            "needs_novelty_review",
+            "needs_novelty_arbitration",
+            "waiting_pbs",
+            "waiting_human",
+            "waiting_time",
+            "paused",
+            "stopped",
+            "complete",
+        ),
+        required=True,
+    )
     handoff.add_argument("--reason", required=True)
     handoff.add_argument("--wake-at")
     handoff.set_defaults(func=cmd_handoff)

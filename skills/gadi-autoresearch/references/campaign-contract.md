@@ -103,9 +103,13 @@ controller-only reviewer with:
 
 The control state `novelty_reviewer_running` cannot change phases, approval, storage, or
 experiments and may record only `novelty_review`. The controller supplies the cold-review
-attestation after verifying a distinct thread and unchanged audit. A rejected, changed, or
-mission-incompatible candidate is returned to `portfolio` when a backup exists, otherwise
-`discovery`.
+attestation after verifying a distinct thread and unchanged audit. The reviewer returns one of
+`clear_to_plan`, `conditional_probe`, or `exact_prior_reject`; a hard rejection requires checked
+functional equivalence, not merely known components. A conditional decision keeps the phase at
+`novelty_review`, opens only capped `novelty_probe` work, then requires a bound author rebuttal and
+`needs_novelty_arbitration`. The controller launches a fresh third thread, which may record only
+`novelty_arbitration`; its ID must differ from author and reviewer. A rejected, changed, or
+mission-incompatible candidate returns to `portfolio` when a backup exists, otherwise `discovery`.
 
 ## Environment and Data Staging
 
@@ -139,10 +143,12 @@ After the job succeeds, record the published storage object:
 
 Never persist an expanded conda/venv, pip cache, Hugging Face cache, extracted sample tree, or compilation directory.
 
-The preview command is available during discovery because it has no scheduler or
-storage side effect. `--execute` requires both `allow_storage_publish` and a mission-compatible
-novelty resolution. Build or acquire persistent inputs only for a contribution that survived cold
-review; do not spend copyq SU or create durable objects merely to make an idea feel concrete.
+The preview command is available during discovery because it has no scheduler or storage side
+effect. `--execute` always requires `allow_storage_publish`. Before final novelty clearance, the
+CLI additionally allows only candidate-independent discovery infrastructure: at most one
+environment job and one data job, 500 SU total, and eight persistent entries. After that cap, or
+after entering planning, storage publication requires a mission-compatible novelty resolution.
+Do not create candidate-specific dependency/data variants merely to make an idea feel concrete.
 
 ## Experiment Registration
 
@@ -172,14 +178,17 @@ Stages are evidence classes, not labels chosen to bypass review:
 
 - `discovery`, `profile`: bounded observation or feasibility probes; novelty clearance is not required
 - `sanity`: infrastructure and real-path witness; novelty clearance is not required
+- `novelty_probe`: only after `conditional_probe`; at most three attempts, 1,000 SU total (reduced for small envelopes), one GPU/four hours per job, and 32 persistent entries
 - `baseline`, `audit`, `paper`: require a mission-compatible resolved contribution
-- `pilot`, `main`, `ablation`: require a cold-reviewed mission-accepted primary contribution
+- `pilot`, `main`, `ablation`: require a mission-accepted primary contribution cleared directly or by attested third-thread arbitration
 
 The CLI checks the classification when the experiment is registered and again immediately
 before batch or interactive submission. A stale or changed artifact therefore blocks a
 previously registered experiment. Every claim-bearing experiment also stores the exact mission,
-route, portfolio, active candidate, idea, novelty-audit, novelty-review, and claim-class hashes;
-after any pivot, register a new experiment instead of relabelling or resubmitting the old one.
+route, portfolio, active candidate, idea, novelty-audit, novelty-review, and claim-class hashes.
+Conditional probes use a separate pre-clearance binding; post-arbitration claim experiments also
+bind rebuttal and arbitration hashes. After any pivot, register a new experiment instead of
+relabelling or resubmitting the old one.
 
 For later work, declare dependencies and an evidence stage:
 
@@ -281,6 +290,8 @@ Record phase changes and canonical artifacts:
 
 Every agent turn ends with one handoff. In `novelty_review`, the author must use
 `needs_novelty_review` until an attested verdict exists; the reviewer hands back to
+`needs_agent`. After a conditional verdict, the author uses `waiting_pbs` for probes and then
+`needs_novelty_arbitration` only after registering the bound rebuttal; the arbiter hands back to
 `needs_agent`. `complete` runs the artifact gate and refuses active jobs, stale/empty or
 expired novelty artifacts, an invalid PDF, or missing required evidence. A safety pause can be
 resumed only with an explicit reason:
