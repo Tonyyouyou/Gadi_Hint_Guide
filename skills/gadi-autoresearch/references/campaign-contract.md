@@ -111,7 +111,7 @@ functional equivalence, not merely known components. A conditional decision keep
 `novelty_arbitration`; its ID must differ from author and reviewer. A rejected, changed, or
 mission-incompatible candidate returns to `portfolio` when a backup exists, otherwise `discovery`.
 
-## Environment and Data Staging
+## Environment, Data, and Model Staging
 
 If no compatible image exists, request `allow_storage_publish` in the user-approved envelope, then copy `run-on-gadi/assets/pbs/build-env-copyq.pbs` into the research workspace, replace every placeholder, and use its jobfs builder. Set a fixed `ENV_NAME` and `ENV_TAG` so the declared success path is known before submission, and record the environment-spec SHA-256 so a queued job cannot consume changed dependencies. Preview and submit through the campaign:
 
@@ -129,24 +129,49 @@ If no compatible image exists, request `allow_storage_publish` in the user-appro
   --expected-files 1 --execute
 ```
 
-Use the corresponding `acquire-data-copyq.pbs` template for downloads. Environment scripts must invoke the installed `build_conda_sqsh.sh`; data scripts must invoke `pack_data.sh`. Direct persistent-filesystem mutation is rejected by the PBS linter. A data success path must be under `/g/data/wa66/Xiangyu/Data` and represent an archive or controlled shard set. Standard compute jobs have no external internet.
+Use the corresponding `acquire-data-copyq.pbs` template for datasets. Environment scripts must invoke the installed `build_conda_sqsh.sh`; data scripts must invoke `pack_data.sh`. Direct persistent-filesystem mutation is rejected by the PBS linter. A data success path must be under `/g/data/wa66/Xiangyu/Data` and represent an archive or controlled shard set. Standard compute jobs have no external internet.
 
-An external success path must not already exist. Publish a new immutable version instead of overwriting a known environment or dataset. `--expected-files` counts the published file itself, or a shard directory plus all entries below it; a finished external job that exceeds this declaration fails the campaign check.
+Public pretrained models are a separate, explicitly approved packed-input class. Record
+`allow_model_publish` in addition to `allow_storage_publish`, copy
+`run-on-gadi/assets/pbs/acquire-model-copyq.pbs` into the workspace, pin the repository to an
+immutable commit, record the license, and replace every placeholder. The copyq job downloads into
+jobfs and invokes `pack_data.sh --kind model`; it may publish exactly one archive directly under
+`/g/data/wa66/Xiangyu/Data/models`:
+
+```bash
+"$PYTHON" "$CAMPAIGN" external-submit "$ROOT" \
+  --id acquire-model-v1 --stage model \
+  --pbs /workspace/pbs/acquire-model-v1.pbs \
+  --success-path /g/data/wa66/Xiangyu/Data/models/model-COMMIT.tar.zst \
+  --expected-files 1
+
+"$PYTHON" "$CAMPAIGN" external-submit "$ROOT" \
+  --id acquire-model-v1 --stage model \
+  --pbs /workspace/pbs/acquire-model-v1.pbs \
+  --success-path /g/data/wa66/Xiangyu/Data/models/model-COMMIT.tar.zst \
+  --expected-files 1 --execute
+```
+
+An external success path must not already exist. Publish a new immutable version instead of overwriting a known environment, dataset, or model. `--expected-files` counts the published file itself, or a shard directory plus all entries below it; a finished external job that exceeds this declaration fails the campaign check.
 
 After the job succeeds, record the published storage object:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" storage-set "$ROOT" \
   --environment /g/data/wa66/Xiangyu/enviroment_cache/project-v1.sqsh \
-  --data /g/data/wa66/Xiangyu/Data/dataset-v1.tar.zst
+  --data /g/data/wa66/Xiangyu/Data/dataset-v1.tar.zst \
+  --data /g/data/wa66/Xiangyu/Data/models/model-COMMIT.tar.zst
 ```
 
-Never persist an expanded conda/venv, pip cache, Hugging Face cache, extracted sample tree, or compilation directory.
+Expand a packed model only below the consuming compute job's `$PBS_JOBFS`, using
+`run-on-gadi/scripts/stage_archive.sh`. Never persist an expanded conda/venv, model repository,
+model shard tree, pip/Hugging Face cache, extracted sample tree, or compilation directory.
 
 The preview command is available during discovery because it has no scheduler or storage side
-effect. `--execute` always requires `allow_storage_publish`. Before final novelty clearance, the
-CLI additionally allows only candidate-independent discovery infrastructure: at most one
-environment job and one data job, 500 SU total, and eight persistent entries. After that cap, or
+effect. `--execute` always requires `allow_storage_publish`; `stage=model` also requires
+`allow_model_publish`. Before final novelty clearance, the CLI additionally allows only
+candidate-independent discovery infrastructure: at most two environment/data/model jobs in total,
+500 SU total, and eight persistent entries. After that cap, or
 after entering planning, storage publication requires a mission-compatible novelty resolution.
 Do not create candidate-specific dependency/data variants merely to make an idea feel concrete.
 

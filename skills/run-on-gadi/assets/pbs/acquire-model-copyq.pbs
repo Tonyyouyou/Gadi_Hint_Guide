@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Replace every CHANGE_ME and create the PBS log parent before qsub.
+# Use an immutable 40-character Hugging Face commit, never a branch or tag.
+#PBS -P CHANGE_ME
+#PBS -q copyq
+#PBS -N acquire-model
+#PBS -l ncpus=1
+#PBS -l mem=4GB
+#PBS -l jobfs=200GB
+#PBS -l walltime=10:00:00
+#PBS -l storage=gdata/wa66
+#PBS -l wd
+#PBS -j oe
+#PBS -o /g/data/wa66/Xiangyu/Result_CHANGE_ME/pbs-logs/acquire-model-CHANGE_ME.log
+
+set -euo pipefail
+
+export TMPDIR="$PBS_JOBFS/tmp"
+export XDG_CACHE_HOME="$PBS_JOBFS/cache/xdg"
+export HF_HOME="$PBS_JOBFS/cache/huggingface"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HUGGINGFACE_HUB_CACHE"
+
+MODEL_NAME=CHANGE_ME
+MODEL_TAG=CHANGE_ME
+HF_REPO=CHANGE_ME
+HF_REVISION=CHANGE_ME
+MODEL_LICENSE=CHANGE_ME
+DOWNLOAD_ROOT="$PBS_JOBFS/download/$MODEL_NAME"
+PYTHON=/home/561/xz4320/miniconda3/bin/python3
+DOWNLOADER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/download_hf_snapshot.py
+PACKER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/pack_data.sh
+
+[[ "$HF_REVISION" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "ERROR: HF_REVISION must be an immutable 40-character commit" >&2
+  exit 2
+}
+
+mkdir -p "$DOWNLOAD_ROOT"
+"$PYTHON" "$DOWNLOADER" \
+  --repo "$HF_REPO" \
+  --revision "$HF_REVISION" \
+  --destination "$DOWNLOAD_ROOT"
+
+if find "$DOWNLOAD_ROOT" -xdev -type l -print -quit | grep -q .; then
+  echo "ERROR: downloaded model contains symlinks" >&2
+  exit 2
+fi
+
+bash "$PACKER" \
+  --kind model \
+  --name "$MODEL_NAME" \
+  --tag "$MODEL_TAG" \
+  --source "$DOWNLOAD_ROOT" \
+  --source-uri "https://huggingface.co/$HF_REPO" \
+  --source-revision "$HF_REVISION" \
+  --license "$MODEL_LICENSE"

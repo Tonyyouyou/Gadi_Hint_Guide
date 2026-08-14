@@ -642,6 +642,13 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(state["control"]["thread_id"], "thread-test")
         self.assertIn("without the required campaign handoff", state["control"]["reason"])
 
+    def test_agent_prompt_requires_approved_packed_model_assets(self) -> None:
+        prompt = controller.agent_prompt(self.root, campaign.load_state(self.root))
+        self.assertIn("approval.allow_model_publish=true", prompt)
+        self.assertIn("/g/data/wa66/Xiangyu/Data/models", prompt)
+        self.assertIn("exactly one .tar.zst", prompt)
+        self.assertIn("compute job's PBS jobfs", prompt)
+
     def test_stale_agent_state_pauses_instead_of_launching_duplicate(self) -> None:
         with campaign.locked_state(self.root) as state:
             state["control"].update({"state": "agent_running", "reason": "simulated controller loss"})

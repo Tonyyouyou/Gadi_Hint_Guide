@@ -411,10 +411,12 @@ rebuttal and arbitration hashes.
 
 `discovery`, `sanity`, and `profile` experiments may run before the gate because they generate
 bounded observations or test infrastructure/feasibility with existing frozen inputs. Before final
-clearance, at most two candidate-independent storage jobs may publish one environment and one data
-object, totaling at most 500 SU and eight persistent entries. They still require explicit
+clearance, at most two candidate-independent storage jobs may publish environment, data, or model
+inputs, totaling at most 500 SU and eight persistent entries. They still require explicit
 `allow_storage_publish`, the audited jobfs builder/packer, an immutable `.sqsh` under
 `/g/data/wa66/Xiangyu/enviroment_cache`, or packed data under `/g/data/wa66/Xiangyu/Data`.
+Publishing a public pretrained model additionally requires `allow_model_publish`, an immutable
+source revision and license, and exactly one `.tar.zst` under `/g/data/wa66/Xiangyu/Data/models`.
 All experiment registration and submission revalidate the applicable bound artifacts and caps.
 Changing the mission requires a new campaign. Changing the route or portfolio invalidates later
 claim artifacts. Changing the idea report invalidates the audit; changing the audit invalidates the

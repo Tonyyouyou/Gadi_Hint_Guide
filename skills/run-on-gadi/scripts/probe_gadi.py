@@ -79,7 +79,7 @@ def collect(projects: list[str], include_queues: bool) -> dict[str, object]:
             path_status(CODEX_ROOT, "Codex configuration and skills only", False),
             path_status(SKILL_ROOT, "Installed run-on-gadi skill", False),
             path_status(ENV_ROOT, "Single-file .sqsh environments", True),
-            path_status(DATA_ROOT, "Packed datasets and manifests", True),
+            path_status(DATA_ROOT, "Packed datasets, approved model archives, and manifests", True),
         ],
         "startup_jobfs_references": startup_jobfs_references(),
         "groups": run(["id", "-nG"]),
@@ -98,7 +98,7 @@ def print_human(report: dict[str, object]) -> None:
     print("Storage policy:")
     print(f"  Codex-only, never workload output: {CODEX_ROOT}")
     print(f"  Frozen environments:             {ENV_ROOT}")
-    print(f"  Packed datasets:                 {DATA_ROOT}")
+    print(f"  Packed datasets/models:          {DATA_ROOT}")
     print("  Expanded envs/downloads/caches:  $PBS_JOBFS")
     for item in report["paths"]:
         state = "exists" if item["exists"] else "MISSING"

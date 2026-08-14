@@ -30,6 +30,7 @@ class CampaignTests(unittest.TestCase):
         self.result_parent = self.persistent / "Result_Test"
         self.env_root = self.persistent / "enviroment_cache"
         self.data_root = self.persistent / "Data"
+        self.model_root = self.data_root / "models"
         self.codex_root = self.persistent / ".codex"
         self.workspace = self.persistent / "workspace"
         for path in (self.result_parent, self.env_root, self.data_root, self.codex_root, self.workspace):
@@ -142,7 +143,13 @@ class CampaignTests(unittest.TestCase):
         code, _, error = self.call(*arguments)
         self.assertEqual(code, 0, error)
 
-    def approve(self, *, allow_cancel: bool = False, allow_storage: bool = False) -> None:
+    def approve(
+        self,
+        *,
+        allow_cancel: bool = False,
+        allow_storage: bool = False,
+        allow_model: bool = False,
+    ) -> None:
         arguments = [
             "approve",
             str(self.root),
@@ -156,6 +163,8 @@ class CampaignTests(unittest.TestCase):
             arguments.append("--allow-auto-cancel")
         if allow_storage:
             arguments.append("--allow-storage-publish")
+        if allow_model:
+            arguments.append("--allow-model-publish")
         code, _, error = self.call(*arguments)
         self.assertEqual(code, 0, error)
 
@@ -1644,6 +1653,129 @@ class CampaignTests(unittest.TestCase):
             "discovery_infrastructure",
         )
         self.assertEqual(state["experiments"]["build-env-v2"]["status"], "queued")
+
+    def test_external_model_job_requires_typed_single_archive_and_capability(self) -> None:
+        self.init()
+        self.approve(allow_storage=True, allow_model=True)
+        self.model_root.mkdir()
+        pbs = self.workspace / "acquire-model.pbs"
+        success = self.model_root / "public-model-deadbeef.tar.zst"
+        pbs.write_text(
+            "#!/usr/bin/env bash\n"
+            "#PBS -P wa66\n#PBS -q copyq\n#PBS -N model\n"
+            "#PBS -l ncpus=1\n#PBS -l mem=8GB\n#PBS -l jobfs=100GB\n"
+            "#PBS -l walltime=01:00:00\n#PBS -l storage=gdata/wa66\n#PBS -l wd\n"
+            f"#PBS -j oe\n#PBS -o {self.root}/acquire-model.log\n"
+            "set -euo pipefail\nexport TMPDIR=\"$PBS_JOBFS/tmp\"\nmkdir -p \"$TMPDIR\"\n"
+            "PACKER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/pack_data.sh\n"
+            "bash \"$PACKER\" --kind model --help\n",
+            encoding="utf-8",
+        )
+        lint_report = {
+            "errors": [],
+            "warnings": [],
+            "summary": {
+                "project": "wa66",
+                "queue": "copyq",
+                "ncpus": 1,
+                "ngpus": 0,
+                "mem_gb": 8,
+                "jobfs_gb": 100,
+                "walltime_hours": 1.0,
+            },
+        }
+        arguments = (
+            "external-submit",
+            str(self.root),
+            "--id",
+            "acquire-model-v1",
+            "--stage",
+            "model",
+            "--pbs",
+            str(pbs),
+            "--success-path",
+            str(success),
+            "--expected-files",
+            "1",
+        )
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, output, error = self.call(*arguments)
+        self.assertEqual(code, 0, error)
+        self.assertIn(str(success), output)
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, output, error = self.call(*arguments, "--execute")
+        self.assertEqual(code, 0, error)
+        self.assertIn("12345.gadi-pbs", output)
+        experiment = CAMPAIGN.load_state(self.root)["experiments"]["acquire-model-v1"]
+        self.assertEqual(experiment["stage"], "model")
+        self.assertEqual(experiment["expected_files"], 1)
+
+    def test_external_model_job_rejects_unpacked_or_multi_entry_targets(self) -> None:
+        self.init()
+        self.approve(allow_storage=True, allow_model=True)
+        self.model_root.mkdir()
+        pbs = self.workspace / "acquire-model-invalid.pbs"
+        pbs.write_text(
+            "#!/usr/bin/env bash\n"
+            "#PBS -P wa66\n#PBS -q copyq\n#PBS -N model\n"
+            "#PBS -l ncpus=1\n#PBS -l mem=8GB\n#PBS -l jobfs=100GB\n"
+            "#PBS -l walltime=01:00:00\n#PBS -l storage=gdata/wa66\n#PBS -l wd\n"
+            f"#PBS -j oe\n#PBS -o {self.root}/acquire-model-invalid.log\n"
+            "set -euo pipefail\nPACKER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/scripts/pack_data.sh\n"
+            "bash \"$PACKER\" --kind model --help\n",
+            encoding="utf-8",
+        )
+        lint_report = {
+            "errors": [],
+            "warnings": [],
+            "summary": {
+                "project": "wa66",
+                "queue": "copyq",
+                "ncpus": 1,
+                "ngpus": 0,
+                "mem_gb": 8,
+                "jobfs_gb": 100,
+                "walltime_hours": 1.0,
+            },
+        }
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, _, error = self.call(
+                "external-submit",
+                str(self.root),
+                "--id",
+                "bad-model-v1",
+                "--stage",
+                "model",
+                "--pbs",
+                str(pbs),
+                "--success-path",
+                str(self.data_root / "loose-model"),
+                "--expected-files",
+                "2",
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("exactly one .tar.zst", error)
+
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["approval"]["allow_model_publish"] = False
+        with mock.patch.object(CAMPAIGN, "lint_script", return_value=lint_report):
+            code, _, error = self.call(
+                "external-submit",
+                str(self.root),
+                "--id",
+                "unapproved-model-v1",
+                "--stage",
+                "model",
+                "--pbs",
+                str(pbs),
+                "--success-path",
+                str(self.model_root / "public-model-deadbeef.tar.zst"),
+                "--expected-files",
+                "1",
+                "--execute",
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("allow_model_publish", error)
 
     def test_refresh_obeys_ten_minute_guard(self) -> None:
         self.init()

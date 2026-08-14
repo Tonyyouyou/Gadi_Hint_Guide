@@ -126,7 +126,7 @@ def path_policy_checks(text: str, errors: list[str], warnings: list[str]) -> Non
         for skill_path in READ_ONLY_SKILL_PATHS:
             remainder = remainder.replace(skill_path, "")
         read_only_assignment = re.match(
-            r"^\s*(?:export\s+)?(?:RUNNER|BUILDER|PACKER|SKILL_ROOT)\s*=",
+            r"^\s*(?:export\s+)?(?:RUNNER|BUILDER|PACKER|DOWNLOADER|SKILL_ROOT)\s*=",
             line,
         )
         read_only_invocation = re.match(r"^\s*(?:bash|(?:\S*/)?python3?|source)\s+", line)

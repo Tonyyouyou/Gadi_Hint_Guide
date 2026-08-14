@@ -90,6 +90,15 @@ class LintTests(unittest.TestCase):
         errors, _, _ = self.lint_text(text)
         self.assertEqual(errors, [])
 
+    def test_run_on_gadi_downloader_read_is_allowed(self) -> None:
+        text = BASE + (
+            "DOWNLOADER=/g/data/wa66/Xiangyu/.codex/skills/run-on-gadi/"
+            "scripts/download_hf_snapshot.py\n"
+            'python3 "$DOWNLOADER" --help\n'
+        )
+        errors, _, _ = self.lint_text(text)
+        self.assertEqual(errors, [])
+
     def test_gadi_autoresearch_control_command_is_rejected_inside_pbs(self) -> None:
         text = BASE + (
             "python3 /g/data/wa66/Xiangyu/.codex/skills/gadi-autoresearch/"

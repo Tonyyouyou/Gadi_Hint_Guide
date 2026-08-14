@@ -237,6 +237,7 @@ def policy_roots() -> dict[str, Path]:
         "codex": persistent / ".codex",
         "environment": persistent / "enviroment_cache",
         "data": persistent / "Data",
+        "models": persistent / "Data" / "models",
     }
 
 
@@ -596,6 +597,13 @@ def validate_packed_data(path: Path) -> None:
     validate_data_path(path)
     if path.is_dir() and count_entries(path, 1000) > 1000:
         raise CampaignError(f"data directory has more than 1000 entries; pack or coarsely shard it first: {path}")
+
+
+def validate_packed_model(path: Path) -> None:
+    validate_packed_data(path)
+    model_root = policy_roots()["models"]
+    if not path.is_file() or path.parent != model_root or not path.name.endswith(".tar.zst"):
+        raise CampaignError(f"model assets must be single .tar.zst files directly under {model_root}: {path}")
 
 
 def parse_projects(value: str) -> list[str]:
@@ -1171,6 +1179,7 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
             "deadline": deadline.isoformat().replace("+00:00", "Z"),
             "allow_auto_submit": False,
             "allow_storage_publish": False,
+            "allow_model_publish": False,
             "allow_interactive": False,
             "allow_auto_agent": False,
             "allow_auto_cancel": False,
@@ -1297,6 +1306,7 @@ def cmd_approve(args: argparse.Namespace) -> None:
                 "approved_by": args.by,
                 "allow_auto_submit": args.allow_auto_submit,
                 "allow_storage_publish": args.allow_storage_publish,
+                "allow_model_publish": args.allow_model_publish,
                 "allow_interactive": args.allow_interactive,
                 "allow_auto_agent": args.allow_auto_agent,
                 "allow_auto_cancel": args.allow_auto_cancel,
@@ -1316,6 +1326,7 @@ def cmd_approve(args: argparse.Namespace) -> None:
                 for key in (
                     "allow_auto_submit",
                     "allow_storage_publish",
+                    "allow_model_publish",
                     "allow_interactive",
                     "allow_auto_agent",
                     "allow_auto_cancel",
@@ -1369,6 +1380,7 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
         except adapter_registry.AdapterError as exc:
             raise CampaignError(f"cannot adopt an invalid adapter registry: {exc}") from exc
         previous_control_reason = state["control"].get("reason")
+        state["approval"].setdefault("allow_model_publish", False)
         state["skill_reference"] = current
         registry_changed = (previous_registry or {}).get("sha256") != registry["sha256"]
         invalidated: list[str] = []
@@ -2928,6 +2940,15 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
     if args.stage == "environment":
         if success_path.suffix != ".sqsh" or not is_within(success_path, roots["environment"]):
             raise CampaignError(f"environment success path must be a .sqsh under {roots['environment']}")
+    elif args.stage == "model":
+        if (
+            success_path.parent != roots["models"]
+            or not success_path.name.endswith(".tar.zst")
+            or args.expected_files != 1
+        ):
+            raise CampaignError(
+                f"model acquisition must publish exactly one .tar.zst directly under {roots['models']}"
+            )
     elif not is_within(success_path, roots["data"]):
         raise CampaignError(f"data success path must be under {roots['data']}")
     if success_path.exists():
@@ -2940,6 +2961,8 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
     require_author_control(state, "submit external storage jobs")
     if args.execute:
         require_approved(state, "allow_storage_publish")
+        if args.stage == "model":
+            require_approved(state, "allow_model_publish")
     if args.id in state["experiments"]:
         raise CampaignError(f"experiment already exists: {args.id}")
     output_path = pbs_output_path(script)
@@ -3009,6 +3032,8 @@ def cmd_external_submit(args: argparse.Namespace) -> None:
     with locked_state(args.root) as current:
         require_approved(current, "allow_auto_submit")
         require_approved(current, "allow_storage_publish")
+        if args.stage == "model":
+            require_approved(current, "allow_model_publish")
         require_current_skill(current)
         pin_missing_skill_reference(current)
         require_author_control(current, "submit external storage jobs")
@@ -3482,7 +3507,10 @@ def cmd_refresh(args: argparse.Namespace) -> None:
                             validate_environment(success)
                             produced_entries = 1
                         else:
-                            validate_packed_data(success)
+                            if experiment["stage"] == "model":
+                                validate_packed_model(success)
+                            else:
+                                validate_packed_data(success)
                             storage_identity(success)
                             produced_entries = (
                                 1
@@ -3984,6 +4012,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--by", required=True)
     approve.add_argument("--allow-auto-submit", action="store_true")
     approve.add_argument("--allow-storage-publish", action="store_true")
+    approve.add_argument("--allow-model-publish", action="store_true")
     approve.add_argument("--allow-interactive", action="store_true")
     approve.add_argument("--allow-auto-agent", action="store_true")
     approve.add_argument("--allow-auto-cancel", action="store_true")
@@ -4079,10 +4108,13 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--execute", action="store_true", help="submit after validation; preview is default")
     submit.set_defaults(func=cmd_submit)
 
-    external = sub.add_parser("external-submit", help="submit a linted environment-build or data-acquisition PBS script")
+    external = sub.add_parser(
+        "external-submit",
+        help="submit a linted environment-build, data-acquisition, or packed-model PBS script",
+    )
     external.add_argument("root")
     external.add_argument("--id", required=True)
-    external.add_argument("--stage", choices=("environment", "data"), required=True)
+    external.add_argument("--stage", choices=("environment", "data", "model"), required=True)
     external.add_argument("--pbs", required=True)
     external.add_argument("--success-path", required=True)
     external.add_argument("--expected-files", type=int, required=True)

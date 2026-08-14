@@ -16,6 +16,7 @@ Use designated subdirectories for durable compact artifacts:
 
 - `enviroment_cache/*.sqsh` for frozen environments
 - `Data/` for packed datasets and manifests
+- `Data/models/*.tar.zst` for explicitly approved, immutable public pretrained models
 - Existing `Result*` directories or a user-approved task directory for results
 
 Gdata has both byte and inode quotas. Persist final forms, not build trees.
@@ -110,6 +111,24 @@ When expanded data exceeds node-local jobfs:
 - Resume only from completed shards.
 
 Do not extract the whole dataset to scratch or gdata. If a consumer requires millions of files, stage only its current working subset or change the data pipeline.
+
+## Public Pretrained Models
+
+A reusable public pretrained model is an input asset, not an environment and not a cache. Persist
+one only after explicit user approval:
+
+1. Copy `assets/pbs/acquire-model-copyq.pbs` into the research workspace.
+2. Pin the upstream repository to an immutable commit and record its license.
+3. Download the snapshot and client dependencies only below `$PBS_JOBFS` on `copyq`.
+4. Remove transient downloader metadata and reject symlinks before packing.
+5. Run `pack_data.sh --kind model`; publish exactly one `.tar.zst` directly under `Data/models`.
+6. Register the archive as a data input and use `stage_archive.sh` to expand it only in each
+   consuming compute job's `$PBS_JOBFS`.
+
+Never persist an expanded model repository, loose weight shards, Hugging Face cache, mutable
+branch/tag snapshot, or access token. The embedded manifest records source URL, immutable revision,
+license, source file count/bytes, PBS job ID, and creation time; the published archive is checked by
+SHA-256.
 
 ## Results and Checkpoints
 

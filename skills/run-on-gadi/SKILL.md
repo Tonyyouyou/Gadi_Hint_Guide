@@ -1,6 +1,6 @@
 ---
 name: run-on-gadi
-description: Prepare, validate, submit, monitor, and troubleshoot NCI Gadi PBS jobs with strict inode-safe storage and environment workflows. Use for persistent-session or tmux-backed qsub -I debugging; production batch jobs; bounded autoresearch campaigns; Gadi CPU/GPU work including V100, A100, and H200; PBS scripts; dynamic project/SU selection; quota and file-count checks; copyq downloads; Singularity SquashFS environments; large datasets; checkpoints; distributed PyTorch; or work using /g/data/wa66/Xiangyu.
+description: Prepare, validate, submit, monitor, and troubleshoot NCI Gadi PBS jobs with strict inode-safe storage and environment workflows. Use for persistent-session or tmux-backed qsub -I debugging; production batch jobs; bounded autoresearch campaigns; Gadi CPU/GPU work including V100, A100, and H200; PBS scripts; dynamic project/SU selection; quota and file-count checks; copyq downloads; Singularity SquashFS environments; large datasets; packed public model assets; checkpoints; distributed PyTorch; or work using /g/data/wa66/Xiangyu.
 ---
 
 # Run on Gadi
@@ -24,10 +24,10 @@ Follow these rules before all other preferences:
 1. Reserve `/g/data/wa66/Xiangyu/.codex` exclusively for Codex configuration, skills, and their source repositories. Never store datasets, models, training environments, package caches, downloads, checkpoints, logs, or experiment output there.
 2. Keep HOME for small code and shell configuration only. Never let package caches, environments, datasets, model downloads, checkpoints, or unbounded PBS logs fall back there.
 3. Store frozen environments as single `.sqsh` files in `/g/data/wa66/Xiangyu/enviroment_cache`. Preserve this existing spelling.
-4. Store datasets and packed data in `/g/data/wa66/Xiangyu/Data`.
+4. Store datasets and packed input assets in `/g/data/wa66/Xiangyu/Data`. A public pretrained model requires explicit user approval and may persist only as one immutable, provenance-recorded `.tar.zst` directly under `/g/data/wa66/Xiangyu/Data/models`.
 5. Store results in an existing matching `/g/data/wa66/Xiangyu/Result*` tree or a user-approved task directory under `/g/data/wa66/Xiangyu`. Do not invent a destination when the repository or user already defines one.
 6. Create expanded environments, dependency caches, downloads, compilation trees, and extracted datasets only in `$PBS_JOBFS`.
-7. Persist environments and datasets as a single archive/image or a modest number of coarse shards. Never persist an expanded conda/venv, Hugging Face cache, pip cache, or millions of sample files.
+7. Persist environments and datasets as a single archive/image or a modest number of coarse shards. Never persist an expanded conda/venv, model repository, model shard tree, Hugging Face cache, pip cache, or millions of sample files.
 8. Check inode usage as well as bytes before writing. Free capacity does not imply that another expanded environment or dataset is safe.
 9. Do not use another project's gdata as a spill area. The four projects are possible compute allocations, not alternative persistent roots.
 
@@ -139,6 +139,13 @@ Use [assets/pbs/acquire-data-copyq.pbs](assets/pbs/acquire-data-copyq.pbs) and [
 5. Test the archive before the PBS job discards staging.
 
 For data larger than one node's jobfs, process deterministic partitions sequentially into multi-GB shards. Never work around jobfs size by persistently expanding into scratch or gdata. At runtime, stream compatible shards or use [scripts/stage_archive.sh](scripts/stage_archive.sh) to extract only the working set into jobfs.
+
+For an explicitly approved public pretrained model, use
+[assets/pbs/acquire-model-copyq.pbs](assets/pbs/acquire-model-copyq.pbs). Pin an immutable source
+commit and license, download only on `copyq`, remove transient client metadata in jobfs, and invoke
+`pack_data.sh --kind model`. Publish exactly one archive in `Data/models`; expand it only into the
+consumer job's `$PBS_JOBFS`. Never use a branch/tag revision or publish an expanded Hugging Face
+snapshot.
 
 ## Run and Monitor
 

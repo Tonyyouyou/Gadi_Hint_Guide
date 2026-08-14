@@ -9,6 +9,7 @@ Verified locally on 2026-08-12.
 | Persistent root | `/g/data/wa66/Xiangyu` |
 | Frozen environments | `/g/data/wa66/Xiangyu/enviroment_cache` |
 | Data and packed datasets | `/g/data/wa66/Xiangyu/Data` |
+| Approved packed public models | `/g/data/wa66/Xiangyu/Data/models` |
 | Existing general cache root | `/g/data/wa66/Xiangyu/cache` |
 | Codex-only root | `/g/data/wa66/Xiangyu/.codex` |
 
@@ -50,7 +51,7 @@ NCI reports both byte and inode usage. Treat either limit as capable of stopping
 - Audio and vision datasets can consume an inode per sample.
 - Repeated checkpoints and per-sample logs can exhaust quota even when byte usage is modest.
 
-The safe default is one persistent file per environment, one archive or a modest number of coarse shards per dataset, and bounded checkpoint retention.
+The safe default is one persistent file per environment, one archive or a modest number of coarse shards per dataset, one archive per approved public model, and bounded checkpoint retention.
 
 ## Local Software Snapshot
 
