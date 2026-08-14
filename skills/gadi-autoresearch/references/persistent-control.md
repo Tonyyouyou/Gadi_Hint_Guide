@@ -62,7 +62,8 @@ bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN \
 ```
 
 Keep an exact launcher in the campaign root for failure recovery. The controller forwards the
-pinned settings to the long-lived author thread and to fresh novelty-review and arbitration threads.
+pinned settings to the long-lived author thread and to fresh novelty-review, arbitration, and
+failure-critic threads.
 
 The starter invokes the existing modern control-plane Python explicitly, removes stale PBS/jobfs/cache and ambient model/publishing token variables, and launches a no-profile shell. It never edits HOME startup files. Before creating tmux it runs a real ephemeral Codex canary that must use `apply_patch` to create and verify an exact marker in `/tmp`. A failed canary aborts startup.
 
@@ -75,6 +76,7 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 | `needs_agent` | start/resume one `codex exec` turn |
 | `needs_novelty_review` | start one fresh, non-resumed adversarial reviewer thread |
 | `needs_novelty_arbitration` | start one fresh, non-resumed arbiter thread distinct from author and reviewer |
+| `needs_failure_review` | start one fresh, non-resumed critic for a terminal-experiment interpretation |
 | `waiting_pbs` | refresh tracked batch jobs at the permitted cadence, or wake the agent to inspect a recorded interactive tmux pane |
 | `waiting_time` | sleep until recorded UTC time |
 | `waiting_human` | remain idle until genuine external evidence or authorization is recorded |
@@ -82,8 +84,8 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 | `complete` | exit |
 
 Before launching Codex it verifies the pinned skill revision, reruns live
-project/inode/file-envelope preflight, and changes the state to `agent_running` or
-`novelty_reviewer_running`/`novelty_arbiter_running`. Every launch records a host/PID/role lease and Codex must write a handoff. Transient preflight failures, nonzero exits, missing IDs/handoffs, PBS refresh errors, and stale leases schedule durable `waiting_time` recovery with 60, 300, 900, then 3,600 second delays. A repeatedly failing author thread is discarded after the fifth identical failure and reconstructed from `campaign.json`. Successful progress clears the failure counter.
+project/inode/file-envelope preflight, and changes the state to `agent_running`,
+`novelty_reviewer_running`, `novelty_arbiter_running`, or `failure_reviewer_running`. Every launch records a host/PID/role lease and Codex must write a handoff. Transient preflight failures, nonzero exits, missing IDs/handoffs, PBS refresh errors, and stale leases schedule durable `waiting_time` recovery with 60, 300, 900, then 3,600 second delays. A repeatedly failing author thread is discarded after the fifth identical failure and reconstructed from `campaign.json`. Successful progress clears the failure counter.
 
 ARIS persistent hosts currently disable the Linux user namespaces required by Codex's workspace sandbox. The controller therefore uses `codex exec --sandbox danger-full-access --config approval_policy="never"` only after the explicit campaign approval and successful real canary. This is an acknowledged reduction in OS-level containment: safety comes from the immutable mission, campaign capability checks, CLI-only submission/cancellation contract, clean environment, pinned skill, exact job ledger, and live budget/inode checks. Raw `qsub`/`qdel`, direct workload writes, and research data under `.codex` remain forbidden. Do not run the controller outside `start_controller.sh`.
 
@@ -96,6 +98,13 @@ after a bound rebuttal, arbitration is another fresh non-resumed thread that may
 arbitration and handoff. The controller rejects any reused author/reviewer/arbiter ID or changed
 audit/review/rebuttal before attaching `cold_arbitration` metadata. A valid rejection atomically promotes the next ranked portfolio backup; an exhausted portfolio returns to discovery. It never passes the `--dangerously-bypass-approvals-and-sandbox` convenience flag and rotates a single log at 5 MiB.
 
+Failure review is another narrow fresh-thread exception. It begins from the hypothesis,
+registered experiment, source commit, raw compact result, and attempt metadata before exposing the
+author's interpretation. It may only record one failure review and hand back. The controller rejects
+an author-thread reuse, changed interpretation or source workspace, stale review, or missing
+handoff. Adaptive experiment registration and hypothesis mutation remain blocked until the
+controller attaches an independent attestation.
+
 ## Failure Recovery
 
 Login disconnect, Codex failure, and an ordinary controller crash need no human recovery: tmux survives the SSH disconnect, durable controller recovery handles Codex failures, and the supervisor restarts the controller. After a persistent-host restart or hard safety pause:
@@ -104,8 +113,8 @@ Login disconnect, Codex failure, and an ordinary controller crash need no human 
 2. Verify active PBS jobs with one permitted refresh.
 3. Read the bounded controller and relevant PBS log.
 4. Confirm `campaign.json`, workspace Git commit, `.sqsh`, data objects, and result markers still exist.
-5. A stale `agent_running`, `novelty_reviewer_running`, or `novelty_arbiter_running` lease automatically returns to its role-specific queue after backoff; a matching live local PID prevents duplicate launch.
-6. If authentication/session resume repeatedly fails, the controller rotates the author thread from campaign state. Reviewer and arbiter turns always restart in fresh independent contexts.
+5. A stale `agent_running`, `novelty_reviewer_running`, `novelty_arbiter_running`, or `failure_reviewer_running` lease automatically returns to its role-specific queue after backoff; a matching live local PID prevents duplicate launch.
+6. If authentication/session resume repeatedly fails, the controller rotates the author thread from campaign state. Reviewer, arbiter, and failure-critic turns always restart in fresh independent contexts.
 
 If the installed skill revision changed, inspect the diff and ensure no job is active before
 using `campaign.py skill-adopt`. Do not edit the pinned commit/tree in `campaign.json`.

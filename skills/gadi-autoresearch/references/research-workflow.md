@@ -5,12 +5,13 @@
 1. Mission and territory
 2. Evidence-led discovery
 3. Candidate portfolio
-4. Novelty review and fallback
-5. Research contract and plan
-6. Implementation and sanity
-7. Evidence campaign
-8. Review and synthesis
-9. Paper handoff
+4. Hypothesis evolution and failure learning
+5. Novelty review and fallback
+6. Research contract and plan
+7. Implementation and sanity
+8. Evidence campaign
+9. Review and synthesis
+10. Paper handoff
 
 ## Mission and Territory
 
@@ -119,10 +120,171 @@ Do not promote a candidate merely because it is easy to implement. Preserve elim
 and reasons in the portfolio or discovery report. A positive cheap test only promotes a candidate
 to formal novelty audit.
 
+## Hypothesis Evolution and Failure Learning
+
+The portfolio is a search frontier, not a promise that its first active mechanism will succeed.
+After registering it, initialize exactly two additional persistent files:
+
+```bash
+"$PYTHON" "$CAMPAIGN" learning-init "$ROOT" \
+  --reason "start bounded hypothesis evolution from the reviewed portfolio"
+```
+
+- `RESEARCH_GRAPH.json` stores at most 64 hypothesis versions and at most three active branches.
+- `LEARNING_LEDGER.jsonl` stores at most 400 compact interpretation and failure-review records.
+
+Do not create one note, trace, or review file per result. Temporary JSON used by a CLI command
+belongs in jobfs or `/tmp` and is removed after registration. Existing campaigns may migrate while
+paused with `learning-init --adopt-current-claim`; this preserves old novelty artifacts and records
+old terminal experiments as non-confirmatory legacy provenance rather than inventing retrospective
+interpretations.
+
+The seeded graph converts each portfolio candidate into a version-1 hypothesis. Every hypothesis
+records its observation, causal statement, functional mechanism, predictions, falsifiers,
+assumptions, parent, relation (`seed`, `refinement`, or `branch`), and generating finding IDs.
+Freeze one active version before writing a new idea report or novelty audit:
+
+```bash
+"$PYTHON" "$CAMPAIGN" claim-freeze "$ROOT" \
+  --hypothesis-id candidate-a \
+  --reason "candidate-a is the predeclared paper-facing claim"
+```
+
+A material mechanism change clears the old freeze and invalidates claim-facing novelty, plan,
+result, and paper bindings. It does not delete experiments, logs, Git history, the graph, or the
+learning ledger. The new version must be frozen and pass novelty review again.
+
+Register each scientific experiment against one hypothesis and one evidence role:
+
+- `exploratory`: selects, generates, or changes hypotheses; never confirms a later child.
+- `diagnostic`: checks implementation, measurement, bottleneck, or causal localization.
+- `confirmatory`: tests a frozen claim with a predeclared protocol after novelty clearance.
+- `replication`: repeats confirmatory evidence on an independent seed, dataset, model, or system.
+
+The stage supplies a conservative default, but the author should pass both values explicitly when
+the role matters:
+
+```bash
+"$PYTHON" "$CAMPAIGN" experiment-add "$ROOT" \
+  --id boundary-probe-001 --stage profile --mode batch \
+  --evidence-role exploratory --hypothesis-id candidate-a \
+  ...
+```
+
+After PBS or an interactive attempt becomes terminal, no new adaptive scientific experiment may be
+registered until the author records exactly one interpretation. The input schema is:
+
+```json
+{
+  "schema_version": 1,
+  "finding_id": "boundary-regime-001",
+  "experiment_id": "boundary-probe-001",
+  "hypothesis_id": "candidate-a",
+  "evidence_role": "exploratory",
+  "validity": "valid",
+  "outcome": "unexpected",
+  "expected": "One latency regime under the predeclared load range.",
+  "observed": "Two reproducible regimes separated by encoder occupancy.",
+  "surprise": "The transition aligns with encoder occupancy rather than output length.",
+  "alternative_explanations": ["Measurement mode switching", "Allocator threshold"],
+  "assumption_updates": [
+    {
+      "assumption_id": "candidate-a-core",
+      "status": "qualified",
+      "evidence": "The mechanism holds only below the measured occupancy boundary."
+    }
+  ],
+  "information_gain": "high",
+  "proposed_delta": "Branch a workload-conditioned mechanism while retaining the parent.",
+  "next_action": "branch",
+  "discriminating_test": "Predeclare the boundary and repeat on an independent model."
+}
+```
+
+Allowed validity values are `valid`, `technical_invalid`, and `contaminated`. Outcomes are
+`supports`, `falsifies`, `qualifies`, `unexpected`, `inconclusive`, and `not_scientific`.
+Actions are `continue`, `repair`, `refine`, `branch`, `pivot`, `stop`, and `confirm`.
+
+```bash
+"$PYTHON" "$CAMPAIGN" learning-record "$ROOT" --file /tmp/interpretation.json
+```
+
+Apply these transitions:
+
+| Result | Required treatment |
+|---|---|
+| implementation/output/evaluator invalid | `technical_invalid` or `contaminated`, `not_scientific`, then `repair`; scientific belief is unchanged |
+| valid support during exploration | `supports`, then continue or freeze and seek new confirmatory evidence |
+| valid support during confirmation | eligible for the frozen claim, subject to audit and replication |
+| valid falsification, qualification, or surprise | preserve the result and request a fresh failure review |
+| valid result proposing refine/branch/pivot/stop | request a fresh failure review even when the primary metric improved |
+| inconclusive valid result | improve the discriminating test or stop for low information value; do not call it support |
+
+For a required review, the author hands off rather than adapting immediately:
+
+```bash
+"$PYTHON" "$CAMPAIGN" handoff "$ROOT" \
+  --state needs_failure_review \
+  --reason "finding boundary-regime-001 may require a material branch"
+```
+
+The controller launches a fresh non-resumed critic. The critic first inspects the registered
+hypothesis, command, source commit, raw compact result, and attempt metadata without reading the
+author's interpretation. It then reads the interpretation and records this exact schema:
+
+```json
+{
+  "schema_version": 1,
+  "finding_id": "boundary-regime-001",
+  "decision": "accept",
+  "failure_class": "scope",
+  "allowed_action": "branch",
+  "material_change": true,
+  "validity_assessment": "The controlled result is valid and reproducible.",
+  "rationale": "The parent remains plausible in one regime; a parallel branch is justified.",
+  "required_test": "Test the child on an independent model before claim freeze.",
+  "alternative_explanations": ["A hidden allocator threshold could still explain the split."]
+}
+```
+
+Review decisions are `accept`, `revise`, or `reject`. Failure classes are `implementation`,
+`assumption`, `mechanism`, `scope`, `ceiling`, `anomaly`, and `inconclusive`. The controller rejects
+the author's thread, changed inputs, a dirty or changed source workspace, stale provisional review,
+or missing handoff. Only its attestation clears the review gate.
+
+An authorized refinement supersedes its parent. An authorized branch keeps both parent and child
+active. The child JSON contains `id`, the same `candidate_id`, `origin_finding_ids`, observation,
+causal hypothesis, mechanism, predictions, falsifiers, and assumptions. It must cite the reviewed
+finding:
+
+```bash
+"$PYTHON" "$CAMPAIGN" hypothesis-fork "$ROOT" \
+  --parent-id candidate-a --finding-id boundary-regime-001 \
+  --kind branch --file /tmp/child-hypothesis.json
+```
+
+The generating experiment remains bound to `candidate-a`; it is never rewritten as evidence for
+the child and has `confirmation_eligible=false`. Test the child with a new experiment. Keep no more
+than three active branches, and eliminate or supersede them from evidence. Use `candidate-pivot`
+only for an independently justified move to a different portfolio candidate.
+
+If every portfolio candidate is exhausted, return to discovery and record a replacement portfolio.
+That change sets `portfolio_refresh_required` and blocks experiments. Preserve old eliminated
+hypotheses and ledger entries while reseeding the same two files:
+
+```bash
+"$PYTHON" "$CAMPAIGN" learning-reseed "$ROOT" \
+  --reason "old portfolio exhausted; seed the new evidence-led candidates"
+```
+
+Then freeze and novelty-review a new active version. A route change after hypothesis initialization
+uses the same refresh/reseed gate; old hypotheses retain their origin route as history.
+
 ## Novelty Review and Fallback
 
-Read `novelty-audit.md`. Write `IDEA_REPORT.md` for the active portfolio candidate, then create
-schema-version-2 `NOVELTY_AUDIT.json` bound to mission, route, portfolio, and idea hashes. Enter
+Read `novelty-audit.md`. Freeze the selected hypothesis, write `IDEA_REPORT.md`, then create
+schema-version-2 `NOVELTY_AUDIT.json` bound to mission, route, portfolio, idea,
+`hypothesis_id`, and `research_graph_sha256`. Enter
 `novelty_review` and hand off to `needs_novelty_review`.
 
 The controller starts a fresh non-resumed reviewer. It independently searches the mechanism,

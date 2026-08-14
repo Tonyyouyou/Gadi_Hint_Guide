@@ -111,6 +111,43 @@ functional equivalence, not merely known components. A conditional decision keep
 `novelty_arbitration`; its ID must differ from author and reviewer. A rejected, changed, or
 mission-incompatible candidate returns to `portfolio` when a backup exists, otherwise `discovery`.
 
+## Hypothesis and Learning State
+
+After recording `CANDIDATE_PORTFOLIO.json`, initialize the bounded research graph before entering
+`novelty_review`:
+
+```bash
+"$PYTHON" "$CAMPAIGN" learning-init "$ROOT" \
+  --reason "seed versioned hypotheses from the candidate portfolio"
+"$PYTHON" "$CAMPAIGN" claim-freeze "$ROOT" \
+  --hypothesis-id CANDIDATE_ID --reason "predeclare the paper-facing mechanism"
+```
+
+This creates only `RESEARCH_GRAPH.json` and `LEARNING_LEDGER.jsonl`. Both are atomically updated
+and registered as deterministic artifacts. A paused legacy campaign with already attested novelty
+may instead use `learning-init --adopt-current-claim`; it records old terminal jobs as legacy,
+non-confirmatory provenance and does not rewrite their meaning.
+
+Every terminal non-external experiment must be interpreted with `learning-record` before another
+adaptive experiment is registered. Technical invalidity authorizes `repair` without a hypothesis
+change. Valid falsification, qualification, surprise, or proposed `refine`, `branch`, `pivot`, or
+`stop` requires:
+
+```bash
+"$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state needs_failure_review \
+  --reason "FINDING_ID requires an independent causal assessment"
+```
+
+Only the controller's fresh `failure_reviewer_running` thread may call `learning-review`. The
+controller checks a different thread ID, unchanged interpretation/result, and a clean unchanged Git
+workspace before adding the independent attestation. Only then may the author use
+`hypothesis-fork` or a scientifically justified `candidate-pivot`. See `research-workflow.md` for
+the exact interpretation, review, and child-hypothesis schemas.
+
+Replacing an exhausted portfolio or changing its adapter route sets `portfolio_refresh_required`
+and blocks experiment registration. Run `learning-reseed --reason REASON` after recording the new
+portfolio. It retains old eliminated hypotheses and ledger history while reusing the same two files.
+
 ## Environment, Data, and Model Staging
 
 If no compatible image exists, request `allow_storage_publish` in the user-approved envelope, then copy `run-on-gadi/assets/pbs/build-env-copyq.pbs` into the research workspace, replace every placeholder, and use its jobfs builder. Set a fixed `ENV_NAME` and `ENV_TAG` so the declared success path is known before submission, and record the environment-spec SHA-256 so a queued job cannot consume changed dependencies. Preview and submit through the campaign:
@@ -186,6 +223,7 @@ Register a sanity experiment before submission:
 ```bash
 "$PYTHON" "$CAMPAIGN" experiment-add "$ROOT" \
   --id sanity-001 --stage sanity --mode batch \
+  --evidence-role diagnostic --hypothesis-id CANDIDATE_ID \
   --queue gpuhopper --project wa66 --walltime 00:15:00 \
   --ncpus 12 --ngpus 1 --mem-gb 64 --jobfs-gb 100 \
   --expected-files 8 --success-file metrics.json \
@@ -222,6 +260,7 @@ For later work, declare dependencies and an evidence stage:
 ```bash
 "$PYTHON" "$CAMPAIGN" experiment-add "$ROOT" \
   --id main-seeds --stage main --mode batch \
+  --evidence-role confirmatory --hypothesis-id CANDIDATE_ID \
   --depends-on sanity-001 \
   --queue dgxa100 --project ey69 --walltime 08:00:00 \
   --ncpus 16 --ngpus 1 --mem-gb 128 --jobfs-gb 300 \
@@ -319,7 +358,9 @@ Every agent turn ends with one handoff. In `novelty_review`, the author must use
 `needs_novelty_review` until an attested verdict exists; the reviewer hands back to
 `needs_agent`. After a conditional verdict, the author uses `waiting_pbs` for probes and then
 `needs_novelty_arbitration` only after registering the bound rebuttal; the arbiter hands back to
-`needs_agent`. `complete` runs the artifact gate and refuses active jobs, stale/empty or
+`needs_agent`. After a terminal experiment, record its learning interpretation. When that record
+requires independent causal review, the author uses `needs_failure_review`; only the fresh critic
+returns to `needs_agent`. `complete` runs the artifact gate and refuses active jobs, stale/empty or
 expired novelty artifacts, an invalid PDF, or missing required evidence. A safety pause can be
 resumed only with an explicit reason:
 
@@ -338,3 +379,4 @@ resumed only with an explicit reason:
 - The campaign compares current campaign entries, new files added to the Git workspace since initialization, published environment/data objects, planned outputs, and control-file reserve against the approved persistent-file ceiling and live `wa66` inode headroom.
 - The controller keeps at most `controller.log` and `controller.previous.log`.
 - Mission, route, portfolio, and novelty state use a fixed number of compact records, not per-query traces.
+- Hypothesis evolution adds exactly one bounded graph and one bounded JSONL ledger, never one file per finding or review.

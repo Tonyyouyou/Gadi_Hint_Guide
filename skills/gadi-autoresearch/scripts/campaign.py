@@ -26,6 +26,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import adapter_registry
+import research_learning
 
 SCHEMA_VERSION = 2
 PHASES = (
@@ -154,6 +155,21 @@ SAFE_JOB_ID = re.compile(r"^[0-9]+(?:\.[A-Za-z0-9_.-]+)?$")
 AUTHORIZED_PROJECTS = {"wa66", "ey69", "po67", "iv96"}
 CAMPAIGN_ENTRY_RESERVE = 5  # runs/, controller lock/current/previous log, atomic temp.
 CONTROL_PYTHON = Path("/home/561/xz4320/miniconda3/bin/python3")
+LEARNING_GRAPH_NAME = "RESEARCH_GRAPH.json"
+LEARNING_LEDGER_NAME = "LEARNING_LEDGER.jsonl"
+LEARNING_REVIEW_STATES = {"needs_failure_review", "failure_reviewer_running"}
+DEFAULT_EVIDENCE_ROLE = {
+    "discovery": "exploratory",
+    "profile": "diagnostic",
+    "sanity": "diagnostic",
+    NOVELTY_PROBE_STAGE: "exploratory",
+    "pilot": "exploratory",
+    "baseline": "confirmatory",
+    "main": "confirmatory",
+    "ablation": "confirmatory",
+    "audit": "replication",
+    "paper": "diagnostic",
+}
 INTERACTIVE_PROFILES = {
     "normal": {"kind": "cpu", "ncpus": 4, "ngpus": 0},
     "gpuvolta": {"kind": "v100", "ncpus": 12, "ngpus": 1},
@@ -1193,6 +1209,8 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
             "novelty_review_requested_at": None,
             "novelty_arbitration_thread_id": None,
             "novelty_arbitration_requested_at": None,
+            "failure_review_thread_id": None,
+            "failure_review_requested_at": None,
             "agent_turns": 0,
             "last_agent_at": None,
             "last_pbs_poll_at": None,
@@ -1208,6 +1226,7 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
             },
         },
         "artifacts": {},
+        "learning": None,
         "experiments": {},
         "history": [{"at": created, "event": "campaign_initialized"}],
     }
@@ -1437,13 +1456,24 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
                 if state["artifacts"].pop(name, None) is not None:
                     invalidated.append(name)
             state.pop("research_track", None)
+            if isinstance(state.get("learning"), dict) and state["learning"].get("enabled"):
+                state["learning"].update(
+                    {
+                        "portfolio_refresh_required": True,
+                        "claim_freeze": None,
+                        "legacy_novelty_adopted": False,
+                    }
+                )
             if state["phase"] not in {"intake", "territory", "discovery"}:
                 state["phase"] = "discovery"
         state["control"].setdefault("novelty_review_thread_id", None)
         state["control"].setdefault("novelty_review_requested_at", None)
         state["control"].setdefault("novelty_arbitration_thread_id", None)
         state["control"].setdefault("novelty_arbitration_requested_at", None)
+        state["control"].setdefault("failure_review_thread_id", None)
+        state["control"].setdefault("failure_review_requested_at", None)
         state["control"].setdefault("lease", None)
+        state.setdefault("learning", None)
         state["control"].setdefault(
             "recovery",
             {
@@ -1478,6 +1508,16 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     state = load_state(args.root)
     current_skill = current_skill_reference()
+    learning = None
+    if learning_enabled(state):
+        graph = load_research_graph(state)
+        learning = {
+            **state["learning"],
+            "active_hypothesis_ids": graph["active_hypothesis_ids"],
+            "claim_hypothesis_id": graph.get("claim_hypothesis_id"),
+            "pending_interpretation_ids": pending_interpretation_ids(state),
+            "ledger_entries": len(load_learning_ledger(state)),
+        }
     output = {
         "campaign_id": state["campaign_id"],
         "idea": state["idea"],
@@ -1496,6 +1536,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         "control": state["control"],
         "approval": state["approval"],
         "budget": budget_summary(state),
+        "learning": learning,
         "experiments": {
             key: {
                 "stage": value["stage"],
@@ -1505,6 +1546,8 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "image": value.get("image"),
                 "max_su": value.get("max_su"),
                 "expected_files": value.get("expected_files"),
+                "evidence_role": value.get("evidence_role"),
+                "hypothesis_binding": value.get("hypothesis_binding"),
                 "attempts": value.get("attempts", []),
             }
             for key, value in state["experiments"].items()
@@ -1590,6 +1633,14 @@ def cmd_route_set(args: argparse.Namespace) -> None:
             if state["artifacts"].pop(name, None) is not None:
                 invalidated.append(name)
         state.pop("research_track", None)
+        if learning_enabled(state):
+            state["learning"].update(
+                {
+                    "portfolio_refresh_required": True,
+                    "claim_freeze": None,
+                    "legacy_novelty_adopted": False,
+                }
+            )
         state["control"].update(
             {
                 "novelty_review_thread_id": None,
@@ -1633,6 +1684,830 @@ def json_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise CampaignError(f"{label} must be a JSON object")
     return payload
+
+
+def atomic_write_json_payload(path: Path, payload: Any) -> None:
+    text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name)
+
+
+def record_file_artifact(
+    state: dict[str, Any],
+    name: str,
+    path: Path,
+    *,
+    assurance: str,
+) -> None:
+    stat = path.stat()
+    state["artifacts"][name] = {
+        "path": str(path),
+        "recorded_at": utc_now(),
+        "assurance": assurance,
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_file(path),
+    }
+
+
+def learning_enabled(state: dict[str, Any]) -> bool:
+    return isinstance(state.get("learning"), dict) and state["learning"].get("enabled") is True
+
+
+def learning_paths(state: dict[str, Any]) -> tuple[Path, Path]:
+    if not learning_enabled(state):
+        raise CampaignError("initialize the hypothesis-evolution workflow first")
+    learning = state["learning"]
+    graph = canonical(learning["graph_path"], strict=True)
+    ledger = canonical(learning["ledger_path"], strict=True)
+    root = canonical(state["root"], strict=True)
+    if graph.parent != root or ledger.parent != root:
+        raise CampaignError("learning artifacts must live directly under the campaign root")
+    return graph, ledger
+
+
+def load_research_graph(state: dict[str, Any]) -> dict[str, Any]:
+    graph_path, _ = learning_paths(state)
+    graph = json_object(graph_path, "research graph")
+    route_sha256 = (
+        graph.get("route_sha256")
+        if state["learning"].get("portfolio_refresh_required")
+        else validate_route(state)["sha256"]
+    )
+    try:
+        return research_learning.validate_graph(
+            graph,
+            mission_sha256=state["mission_sha256"],
+            route_sha256=route_sha256,
+        )
+    except research_learning.LearningError as exc:
+        raise CampaignError(str(exc)) from exc
+
+
+def load_learning_ledger(state: dict[str, Any]) -> list[dict[str, Any]]:
+    _, ledger_path = learning_paths(state)
+    entries: list[dict[str, Any]] = []
+    for number, line in enumerate(ledger_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise CampaignError(f"invalid learning ledger line {number}: {exc}") from exc
+        if not isinstance(entry, dict):
+            raise CampaignError(f"learning ledger line {number} must be an object")
+        entries.append(entry)
+    if len(entries) > 400:
+        raise CampaignError("learning ledger exceeds the bounded 400-entry limit")
+    return entries
+
+
+def rewrite_learning_ledger(state: dict[str, Any], entries: list[dict[str, Any]]) -> None:
+    if len(entries) > 400:
+        raise CampaignError("learning ledger exceeds the bounded 400-entry limit")
+    _, ledger_path = learning_paths(state)
+    payload = "".join(
+        json.dumps(entry, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n"
+        for entry in entries
+    )
+    fd, temp_name = tempfile.mkstemp(prefix=f".{ledger_path.name}.", suffix=".tmp", dir=ledger_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, ledger_path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name)
+    record_file_artifact(state, "learning_ledger", ledger_path, assurance="deterministic")
+
+
+def write_research_graph(state: dict[str, Any], graph: dict[str, Any]) -> None:
+    try:
+        research_learning.validate_graph(
+            graph,
+            mission_sha256=state["mission_sha256"],
+            route_sha256=validate_route(state)["sha256"],
+        )
+    except research_learning.LearningError as exc:
+        raise CampaignError(str(exc)) from exc
+    graph_path, _ = learning_paths(state)
+    atomic_write_json_payload(graph_path, graph)
+    record_file_artifact(state, "research_graph", graph_path, assurance="deterministic")
+    state["learning"]["graph_sha256"] = sha256_file(graph_path)
+    state["learning"]["graph_revision"] = graph["revision"]
+
+
+def interpretation_entries(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not learning_enabled(state):
+        return {}
+    return {
+        entry["experiment_id"]: entry
+        for entry in load_learning_ledger(state)
+        if entry.get("entry_type") == "interpretation" and isinstance(entry.get("experiment_id"), str)
+    }
+
+
+def pending_interpretation_ids(state: dict[str, Any]) -> list[str]:
+    if not learning_enabled(state):
+        return []
+    interpreted = interpretation_entries(state)
+    return sorted(
+        experiment_id
+        for experiment_id, experiment in state["experiments"].items()
+        if experiment.get("mode") != "external"
+        and experiment_status(experiment) in JOB_TERMINAL
+        and experiment_id not in interpreted
+    )
+
+
+def require_learning_cycle_clear(state: dict[str, Any]) -> None:
+    if not learning_enabled(state):
+        return
+    if state["learning"].get("portfolio_refresh_required"):
+        raise CampaignError("reseed the research graph from the new portfolio before adaptive work")
+    pending = pending_interpretation_ids(state)
+    if pending:
+        raise CampaignError(
+            "record a learning interpretation before registering adaptive work: "
+            + ", ".join(pending)
+        )
+    finding_id = state["learning"].get("pending_failure_review")
+    if finding_id:
+        raise CampaignError(f"fresh failure review is pending for finding {finding_id}")
+    unattested = sorted(
+        finding
+        for finding, review in state["learning"].get("reviews", {}).items()
+        if not review.get("independent")
+    )
+    if unattested:
+        raise CampaignError("failure review lacks controller attestation: " + ", ".join(unattested))
+
+
+def hypothesis_by_id(graph: dict[str, Any], hypothesis_id: str) -> dict[str, Any]:
+    for hypothesis in graph["hypotheses"]:
+        if hypothesis["id"] == hypothesis_id:
+            return hypothesis
+    raise CampaignError(f"unknown hypothesis: {hypothesis_id}")
+
+
+def experiment_hypothesis_binding(
+    state: dict[str, Any],
+    *,
+    evidence_role: str,
+    hypothesis_id: str | None,
+) -> dict[str, Any] | None:
+    if not learning_enabled(state):
+        return None
+    graph = load_research_graph(state)
+    selected = hypothesis_id or graph.get("claim_hypothesis_id") or graph["active_hypothesis_ids"][0]
+    hypothesis = hypothesis_by_id(graph, selected)
+    if hypothesis["status"] != "active":
+        raise CampaignError("experiments may bind only an active hypothesis")
+    if evidence_role in {"confirmatory", "replication"}:
+        if graph.get("claim_hypothesis_id") != selected or not graph.get("claim_frozen_at"):
+            raise CampaignError("confirmatory or replication work requires a frozen claim hypothesis")
+        freeze = state["learning"].get("claim_freeze")
+        if not isinstance(freeze, dict) or freeze.get("hypothesis_id") != selected:
+            raise CampaignError("claim freeze metadata is missing or stale")
+        if freeze.get("graph_sha256") != sha256_file(canonical(state["learning"]["graph_path"], strict=True)):
+            raise CampaignError("the research graph changed after claim freeze")
+    return {
+        "hypothesis_id": selected,
+        "candidate_id": hypothesis["candidate_id"],
+        "version": hypothesis["version"],
+        "graph_revision": graph["revision"],
+        "graph_sha256": sha256_file(canonical(state["learning"]["graph_path"], strict=True)),
+        "evidence_role": evidence_role,
+    }
+
+
+CLAIM_LINEAGE_ARTIFACTS = (
+    "idea_report",
+    "novelty_audit",
+    "novelty_review",
+    "novelty_rebuttal",
+    "novelty_arbitration",
+    "research_contract",
+    "experiment_plan",
+    "experiment_ledger",
+    "results",
+    "experiment_audit",
+    "claim_audit",
+    "narrative_report",
+    "paper_source",
+    "paper_pdf",
+    "citation_audit",
+    "final_report",
+    "human_evaluation",
+)
+
+
+def invalidate_claim_lineage(state: dict[str, Any], *, reason: str) -> list[str]:
+    """Invalidate claim-facing bindings while retaining experiments and learning history."""
+    active = [
+        experiment_id
+        for experiment_id, experiment in state["experiments"].items()
+        if experiment.get("mode") != "external"
+        and experiment.get("stage") not in {"sanity", "profile", "discovery"}
+        and experiment_status(experiment) in JOB_ACTIVE
+    ]
+    if active:
+        raise CampaignError(
+            "cannot mutate a hypothesis while claim-bearing jobs are active: " + ", ".join(active)
+        )
+    invalidated = [name for name in CLAIM_LINEAGE_ARTIFACTS if state["artifacts"].pop(name, None)]
+    state.pop("research_track", None)
+    if state["phase"] not in {"intake", "territory", "discovery", "portfolio"}:
+        state["phase"] = "portfolio"
+    state["control"].update(
+        {
+            "novelty_review_thread_id": None,
+            "novelty_review_requested_at": None,
+            "novelty_arbitration_thread_id": None,
+            "novelty_arbitration_requested_at": None,
+            "reason": reason,
+        }
+    )
+    return invalidated
+
+
+def learning_interpretation_by_finding(
+    state: dict[str, Any], finding_id: str
+) -> dict[str, Any]:
+    matches = [
+        entry
+        for entry in load_learning_ledger(state)
+        if entry.get("entry_type") == "interpretation" and entry.get("finding_id") == finding_id
+    ]
+    if len(matches) != 1:
+        raise CampaignError(f"expected exactly one interpretation for finding {finding_id}")
+    return matches[0]
+
+
+def learning_failure_review_by_finding(
+    state: dict[str, Any], finding_id: str
+) -> dict[str, Any]:
+    matches = [
+        entry
+        for entry in load_learning_ledger(state)
+        if entry.get("entry_type") == "failure_review" and entry.get("finding_id") == finding_id
+    ]
+    if len(matches) != 1:
+        raise CampaignError(f"expected exactly one failure review for finding {finding_id}")
+    return matches[0]
+
+
+def cmd_learning_init(args: argparse.Namespace) -> None:
+    with locked_state(args.root) as state:
+        require_approved(state, require_active=False)
+        require_current_skill(state)
+        pin_missing_skill_reference(state)
+        require_author_control(state, "initialize hypothesis evolution")
+        if learning_enabled(state):
+            raise CampaignError("hypothesis evolution is already initialized")
+        route = validate_route(state)
+        portfolio_path = artifact_file(state, "candidate_portfolio")
+        portfolio = validate_candidate_portfolio(state, portfolio_path)
+        if args.adopt_current_claim and not {
+            "idea_report",
+            "novelty_audit",
+            "novelty_review",
+        }.issubset(state["artifacts"]):
+            raise CampaignError(
+                "--adopt-current-claim is migration-only and requires the existing idea, audit, and review"
+            )
+        if args.adopt_current_claim:
+            attested_novelty_review(state)
+        root = canonical(state["root"], strict=True)
+        graph_path = root / LEARNING_GRAPH_NAME
+        ledger_path = root / LEARNING_LEDGER_NAME
+        if graph_path.exists() or ledger_path.exists():
+            raise CampaignError("learning files already exist but are not registered; inspect them before retrying")
+        if budget_summary(state)["projected_persistent_entries"] + 2 > int(
+            state["approval"]["max_persistent_files"]
+        ):
+            raise CampaignError("learning files would exceed the persistent-file envelope")
+        now = utc_now()
+        if args.graph_file:
+            graph = json_object(canonical(args.graph_file, strict=True), "research graph")
+            try:
+                research_learning.validate_graph(
+                    graph,
+                    mission_sha256=state["mission_sha256"],
+                    route_sha256=route["sha256"],
+                )
+            except research_learning.LearningError as exc:
+                raise CampaignError(str(exc)) from exc
+            if args.adopt_current_claim and not graph.get("claim_hypothesis_id"):
+                raise CampaignError("an adopted graph must identify its frozen claim hypothesis")
+            if not args.adopt_current_claim and graph.get("claim_hypothesis_id"):
+                raise CampaignError("a new custom graph must be unfrozen; use claim-freeze explicitly")
+        else:
+            try:
+                graph = research_learning.seed_graph(
+                    portfolio,
+                    mission_sha256=state["mission_sha256"],
+                    route_sha256=route["sha256"],
+                    now=now,
+                    adopt_current_claim=args.adopt_current_claim,
+                )
+            except research_learning.LearningError as exc:
+                raise CampaignError(str(exc)) from exc
+        atomic_write_json_payload(graph_path, graph)
+        ledger_path.write_text("", encoding="utf-8")
+        state["learning"] = {
+            "enabled": True,
+            "schema_version": research_learning.GRAPH_SCHEMA_VERSION,
+            "initialized_at": now,
+            "graph_path": str(graph_path),
+            "ledger_path": str(ledger_path),
+            "graph_revision": graph["revision"],
+            "graph_sha256": sha256_file(graph_path),
+            "claim_freeze": None,
+            "legacy_novelty_adopted": bool(args.adopt_current_claim),
+            "portfolio_refresh_required": False,
+            "pending_failure_review": None,
+            "reviews": {},
+            "consumed_findings": {},
+        }
+        if args.adopt_current_claim:
+            state["learning"]["claim_freeze"] = {
+                "hypothesis_id": graph["claim_hypothesis_id"],
+                "graph_revision": graph["revision"],
+                "graph_sha256": sha256_file(graph_path),
+                "frozen_at": graph["claim_frozen_at"],
+                "reason": args.reason,
+                "legacy_adoption": True,
+            }
+        legacy_entries: list[dict[str, Any]] = []
+        for experiment_id, experiment in sorted(state["experiments"].items()):
+            status = experiment_status(experiment)
+            if experiment.get("mode") == "external" or status not in JOB_TERMINAL:
+                continue
+            binding = experiment.get("hypothesis_binding") or {}
+            hypothesis_id = binding.get("hypothesis_id") or graph.get("claim_hypothesis_id")
+            if not hypothesis_id:
+                hypothesis_id = graph["active_hypothesis_ids"][0]
+            role = experiment.get("evidence_role") or DEFAULT_EVIDENCE_ROLE.get(
+                experiment.get("stage"), "diagnostic"
+            )
+            valid = status == "completed"
+            legacy_finding_id = f"legacy-{experiment_id}"
+            if len(legacy_finding_id) > 64:
+                legacy_finding_id = (
+                    f"legacy-{experiment_id[:40]}-{hashlib.sha256(experiment_id.encode()).hexdigest()[:16]}"
+                )
+            legacy_entries.append(
+                {
+                    "schema_version": research_learning.LEDGER_SCHEMA_VERSION,
+                    "entry_type": "interpretation",
+                    "finding_id": legacy_finding_id,
+                    "experiment_id": experiment_id,
+                    "hypothesis_id": hypothesis_id,
+                    "evidence_role": role,
+                    "validity": "valid" if valid else "technical_invalid",
+                    "outcome": "inconclusive" if valid else "not_scientific",
+                    "expected": "The historical experiment predates the learning workflow.",
+                    "observed": f"Migrated terminal experiment with recorded status {status}.",
+                    "surprise": "No retrospective scientific interpretation was invented during migration.",
+                    "alternative_explanations": [
+                        "Inspect the original registered command, compact output, and campaign history."
+                    ],
+                    "assumption_updates": [],
+                    "information_gain": "none",
+                    "proposed_delta": "Preserve this evidence as provenance; do not use it to generate or confirm a new claim.",
+                    "next_action": "continue" if valid else "repair",
+                    "discriminating_test": "A future author turn must decide whether a fresh bound experiment is needed.",
+                    "recorded_at": now,
+                    "experiment_status": status,
+                    "source_commit": experiment.get("source_commit"),
+                    "result_sha256": None,
+                    "review_required": False,
+                    "confirmation_eligible": False,
+                    "legacy_migration": True,
+                    "author_thread_id": state["control"].get("thread_id"),
+                }
+            )
+        rewrite_learning_ledger(state, legacy_entries)
+        record_file_artifact(state, "research_graph", graph_path, assurance="deterministic")
+        add_history(
+            state,
+            "hypothesis_evolution_initialized",
+            graph_sha256=state["learning"]["graph_sha256"],
+            adopted_current_claim=bool(args.adopt_current_claim),
+            migrated_terminal_experiments=len(legacy_entries),
+            reason=args.reason,
+        )
+        print(json.dumps(state["learning"], indent=2))
+
+
+def cmd_learning_reseed(args: argparse.Namespace) -> None:
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "reseed hypothesis evolution")
+        if not learning_enabled(state) or not state["learning"].get(
+            "portfolio_refresh_required"
+        ):
+            raise CampaignError("research graph reseeding is not currently required")
+        pending = pending_interpretation_ids(state)
+        if pending:
+            raise CampaignError("interpret terminal experiments before reseeding: " + ", ".join(pending))
+        if state["learning"].get("pending_failure_review"):
+            raise CampaignError("complete the pending failure review before reseeding")
+        if any(
+            experiment_status(experiment) in JOB_ACTIVE
+            for experiment in state["experiments"].values()
+        ):
+            raise CampaignError("cannot reseed the research graph while jobs are active")
+        route = validate_route(state)
+        portfolio = validate_candidate_portfolio(
+            state, artifact_file(state, "candidate_portfolio")
+        )
+        graph_path, _ = learning_paths(state)
+        old_graph = json_object(graph_path, "research graph")
+        try:
+            research_learning.validate_graph(
+                old_graph,
+                mission_sha256=state["mission_sha256"],
+                route_sha256=old_graph.get("route_sha256"),
+            )
+            seeded = research_learning.seed_graph(
+                portfolio,
+                mission_sha256=state["mission_sha256"],
+                route_sha256=route["sha256"],
+                now=utc_now(),
+                adopt_current_claim=False,
+            )
+        except research_learning.LearningError as exc:
+            raise CampaignError(str(exc)) from exc
+        historical = old_graph["hypotheses"]
+        for hypothesis in historical:
+            hypothesis.setdefault("origin_route_sha256", old_graph["route_sha256"])
+            if hypothesis["status"] in {"active", "backup"}:
+                hypothesis["status"] = "eliminated"
+        known_ids = {item["id"] for item in historical}
+        new_hypotheses: list[dict[str, Any]] = []
+        active_ids: list[str] = []
+        for hypothesis in seeded["hypotheses"]:
+            related = [
+                item for item in historical if item["candidate_id"] == hypothesis["candidate_id"]
+            ]
+            if related:
+                parent = max(related, key=lambda item: int(item["version"]))
+                hypothesis["version"] = int(parent["version"]) + 1
+                hypothesis["parent_id"] = parent["id"]
+                hypothesis["relation"] = "refinement"
+            desired_id = hypothesis["id"]
+            if desired_id in known_ids:
+                suffix = f"-v{hypothesis['version']}"
+                base = desired_id[: 64 - len(suffix)]
+                desired_id = f"{base}{suffix}"
+                counter = 2
+                while desired_id in known_ids:
+                    suffix = f"-v{hypothesis['version']}-{counter}"
+                    desired_id = f"{hypothesis['candidate_id'][: 64 - len(suffix)]}{suffix}"
+                    counter += 1
+            hypothesis["id"] = desired_id
+            hypothesis["origin_route_sha256"] = route["sha256"]
+            known_ids.add(desired_id)
+            new_hypotheses.append(hypothesis)
+            if hypothesis["status"] == "active":
+                active_ids.append(desired_id)
+        if len(historical) + len(new_hypotheses) > research_learning.MAX_HYPOTHESES:
+            raise CampaignError("reseeded graph would exceed the bounded hypothesis limit")
+        invalidated = invalidate_claim_lineage(
+            state,
+            reason=f"research graph reseeded from a new portfolio: {args.reason}",
+        )
+        now = utc_now()
+        graph = {
+            "schema_version": research_learning.GRAPH_SCHEMA_VERSION,
+            "mission_sha256": state["mission_sha256"],
+            "route_sha256": route["sha256"],
+            "revision": int(old_graph["revision"]) + 1,
+            "active_hypothesis_ids": active_ids,
+            "claim_hypothesis_id": None,
+            "claim_frozen_at": None,
+            "hypotheses": [*historical, *new_hypotheses],
+            "updated_at": now,
+        }
+        state["learning"]["portfolio_refresh_required"] = False
+        state["learning"]["claim_freeze"] = None
+        state["learning"]["legacy_novelty_adopted"] = False
+        write_research_graph(state, graph)
+        entries = load_learning_ledger(state)
+        entries.append(
+            {
+                "schema_version": research_learning.LEDGER_SCHEMA_VERSION,
+                "entry_type": "portfolio_reseed",
+                "recorded_at": now,
+                "previous_graph_revision": old_graph["revision"],
+                "graph_revision": graph["revision"],
+                "route_sha256": route["sha256"],
+                "active_hypothesis_ids": active_ids,
+                "reason": args.reason,
+            }
+        )
+        rewrite_learning_ledger(state, entries)
+        state["phase"] = "portfolio"
+        state["control"].update(
+            {
+                "state": "needs_agent",
+                "reason": "new portfolio hypotheses are seeded; select and freeze a claim",
+                "wake_at": None,
+            }
+        )
+        add_history(
+            state,
+            "hypothesis_graph_reseeded",
+            graph_revision=graph["revision"],
+            active_hypothesis_ids=active_ids,
+            invalidated_artifacts=invalidated,
+            reason=args.reason,
+        )
+        print(json.dumps({"graph_revision": graph["revision"], "active": active_ids}, indent=2))
+
+
+def cmd_learning_record(args: argparse.Namespace) -> None:
+    payload = json_object(canonical(args.file, strict=True), "interpretation")
+    try:
+        interpretation = research_learning.validate_interpretation(payload)
+    except research_learning.LearningError as exc:
+        raise CampaignError(str(exc)) from exc
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "record experiment learning")
+        if not learning_enabled(state):
+            raise CampaignError("initialize hypothesis evolution before recording learning")
+        if state["learning"].get("pending_failure_review"):
+            raise CampaignError("complete the pending independent failure review first")
+        experiment_id = interpretation["experiment_id"]
+        experiment = state["experiments"].get(experiment_id)
+        if not experiment or experiment.get("mode") == "external":
+            raise CampaignError(f"interpretation references an unknown scientific experiment: {experiment_id}")
+        status = experiment_status(experiment)
+        if status not in JOB_TERMINAL:
+            raise CampaignError(f"experiment {experiment_id} is not terminal: {status}")
+        entries = load_learning_ledger(state)
+        if any(
+            entry.get("entry_type") == "interpretation"
+            and (
+                entry.get("experiment_id") == experiment_id
+                or entry.get("finding_id") == interpretation["finding_id"]
+            )
+            for entry in entries
+        ):
+            raise CampaignError("each experiment and finding may be interpreted exactly once")
+        binding = experiment.get("hypothesis_binding")
+        if not isinstance(binding, dict):
+            raise CampaignError("experiment lacks a hypothesis binding; migrate it instead of retrofitting a claim")
+        if interpretation["hypothesis_id"] != binding.get("hypothesis_id"):
+            raise CampaignError("interpretation is bound to a different hypothesis")
+        if interpretation["evidence_role"] != experiment.get("evidence_role"):
+            raise CampaignError("interpretation evidence role differs from experiment registration")
+        graph = load_research_graph(state)
+        hypothesis = hypothesis_by_id(graph, interpretation["hypothesis_id"])
+        assumption_ids = {item["id"] for item in hypothesis["assumptions"]}
+        unknown_assumptions = sorted(
+            update["assumption_id"]
+            for update in interpretation["assumption_updates"]
+            if update["assumption_id"] not in assumption_ids
+        )
+        if unknown_assumptions:
+            raise CampaignError("interpretation updates unknown assumptions: " + ", ".join(unknown_assumptions))
+        result_sha256 = None
+        if status == "completed":
+            success = canonical(experiment["success_file"], strict=True)
+            if not success.is_file():
+                raise CampaignError("completed experiment has no regular success marker")
+            result_sha256 = sha256_file(success)
+        review_needed = research_learning.review_required(interpretation)
+        confirmation_eligible = bool(
+            interpretation["evidence_role"] in {"confirmatory", "replication"}
+            and interpretation["validity"] == "valid"
+            and interpretation["outcome"] == "supports"
+            and interpretation["finding_id"] not in hypothesis.get("origin_finding_ids", [])
+        )
+        entry = {
+            **interpretation,
+            "entry_type": "interpretation",
+            "recorded_at": utc_now(),
+            "experiment_status": status,
+            "source_commit": experiment.get("source_commit"),
+            "registered_graph_sha256": binding.get("graph_sha256"),
+            "result_sha256": result_sha256,
+            "review_required": review_needed,
+            "confirmation_eligible": confirmation_eligible,
+            "legacy_migration": False,
+            "author_thread_id": state["control"].get("thread_id"),
+        }
+        entries.append(entry)
+        rewrite_learning_ledger(state, entries)
+        if review_needed:
+            state["learning"]["pending_failure_review"] = interpretation["finding_id"]
+            state["learning"]["reviews"][interpretation["finding_id"]] = {
+                "independent": False,
+                "requested": False,
+            }
+        state["learning"]["last_finding_id"] = interpretation["finding_id"]
+        add_history(
+            state,
+            "experiment_interpreted",
+            experiment_id=experiment_id,
+            finding_id=interpretation["finding_id"],
+            validity=interpretation["validity"],
+            outcome=interpretation["outcome"],
+            next_action=interpretation["next_action"],
+            review_required=review_needed,
+            confirmation_eligible=confirmation_eligible,
+        )
+        print(json.dumps(entry, indent=2))
+
+
+def cmd_learning_review(args: argparse.Namespace) -> None:
+    payload = json_object(canonical(args.file, strict=True), "failure review")
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        if state["control"]["state"] != "failure_reviewer_running":
+            raise CampaignError("failure reviews may be recorded only by the controller's fresh reviewer")
+        finding_id = state.get("learning", {}).get("pending_failure_review")
+        if not finding_id:
+            raise CampaignError("no failure review is pending")
+        interpretation = learning_interpretation_by_finding(state, finding_id)
+        try:
+            review = research_learning.validate_failure_review(payload, interpretation)
+        except research_learning.LearningError as exc:
+            raise CampaignError(str(exc)) from exc
+        if state["learning"].get("reviews", {}).get(finding_id, {}).get("independent"):
+            raise CampaignError("the failure review is already independently attested")
+        entries = [
+            entry
+            for entry in load_learning_ledger(state)
+            if not (entry.get("entry_type") == "failure_review" and entry.get("finding_id") == finding_id)
+        ]
+        entry = {
+            **review,
+            "entry_type": "failure_review",
+            "recorded_at": utc_now(),
+            "interpretation_sha256": sha256_json(interpretation),
+            "reviewer_thread_id": None,
+            "independent": False,
+        }
+        entries.append(entry)
+        rewrite_learning_ledger(state, entries)
+        state["learning"]["reviews"][finding_id] = {
+            "independent": False,
+            "requested": True,
+            "interpretation_sha256": entry["interpretation_sha256"],
+            "recorded_at": entry["recorded_at"],
+        }
+        add_history(
+            state,
+            "failure_review_recorded_provisionally",
+            finding_id=finding_id,
+            decision=review["decision"],
+            allowed_action=review["allowed_action"],
+        )
+        print(json.dumps(entry, indent=2))
+
+
+def cmd_hypothesis_fork(args: argparse.Namespace) -> None:
+    child_payload = json_object(canonical(args.file, strict=True), "child hypothesis")
+    try:
+        child_spec = research_learning.validate_child_spec(child_payload)
+    except research_learning.LearningError as exc:
+        raise CampaignError(str(exc)) from exc
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "mutate hypotheses")
+        require_learning_cycle_clear(state)
+        finding_id = args.finding_id
+        interpretation = learning_interpretation_by_finding(state, finding_id)
+        review = learning_failure_review_by_finding(state, finding_id)
+        attestation = state["learning"].get("reviews", {}).get(finding_id, {})
+        if not attestation.get("independent") or review.get("decision") == "reject":
+            raise CampaignError("hypothesis mutation requires an accepted independent failure review")
+        if review.get("allowed_action") != args.kind:
+            raise CampaignError(
+                f"failure review authorizes {review.get('allowed_action')}, not {args.kind}"
+            )
+        if state["learning"].get("consumed_findings", {}).get(finding_id):
+            raise CampaignError("this finding has already produced a hypothesis mutation")
+        graph = load_research_graph(state)
+        parent = hypothesis_by_id(graph, args.parent_id)
+        if interpretation["hypothesis_id"] != parent["id"]:
+            raise CampaignError("finding is bound to a different parent hypothesis")
+        if child_spec["candidate_id"] != parent["candidate_id"]:
+            raise CampaignError("refinements and branches must remain within the parent candidate")
+        if child_spec["id"] in {item["id"] for item in graph["hypotheses"]}:
+            raise CampaignError(f"hypothesis already exists: {child_spec['id']}")
+        if finding_id not in child_spec["origin_finding_ids"]:
+            raise CampaignError("child hypothesis must cite the generating finding in origin_finding_ids")
+        active_ids = list(graph["active_hypothesis_ids"])
+        if args.kind == "refine":
+            if parent["id"] not in active_ids:
+                raise CampaignError("only an active hypothesis can be refined")
+            parent["status"] = "superseded"
+            active_ids.remove(parent["id"])
+        elif parent["id"] not in active_ids:
+            raise CampaignError("only an active hypothesis can be branched")
+        active_ids.append(child_spec["id"])
+        if len(active_ids) > research_learning.MAX_ACTIVE_HYPOTHESES:
+            raise CampaignError(
+                f"at most {research_learning.MAX_ACTIVE_HYPOTHESES} hypotheses may remain active"
+            )
+        invalidated = invalidate_claim_lineage(
+            state,
+            reason=f"{args.kind} hypothesis {parent['id']} into {child_spec['id']}",
+        )
+        now = utc_now()
+        child = {
+            **child_spec,
+            "version": parent["version"] + 1,
+            "parent_id": parent["id"],
+            "relation": args.kind,
+            "status": "active",
+            "created_at": now,
+        }
+        graph["hypotheses"].append(child)
+        graph["active_hypothesis_ids"] = active_ids
+        graph["claim_hypothesis_id"] = None
+        graph["claim_frozen_at"] = None
+        graph["revision"] += 1
+        graph["updated_at"] = now
+        state["learning"]["claim_freeze"] = None
+        state["learning"]["legacy_novelty_adopted"] = False
+        state["learning"]["consumed_findings"][finding_id] = child["id"]
+        write_research_graph(state, graph)
+        state["control"].update({"state": "needs_agent", "wake_at": None})
+        add_history(
+            state,
+            "hypothesis_mutated",
+            kind=args.kind,
+            parent_id=parent["id"],
+            child_id=child["id"],
+            finding_id=finding_id,
+            invalidated_artifacts=invalidated,
+        )
+        print(json.dumps({"hypothesis": child, "invalidated_artifacts": invalidated}, indent=2))
+
+
+def cmd_claim_freeze(args: argparse.Namespace) -> None:
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "freeze a paper-facing claim")
+        require_learning_cycle_clear(state)
+        graph = load_research_graph(state)
+        hypothesis = hypothesis_by_id(graph, args.hypothesis_id)
+        if hypothesis["status"] != "active":
+            raise CampaignError("only an active hypothesis can be frozen as the paper-facing claim")
+        current = state["learning"].get("claim_freeze")
+        if current and current.get("hypothesis_id") == args.hypothesis_id:
+            raise CampaignError("this hypothesis is already frozen; do not refresh the timestamp opportunistically")
+        invalidated = invalidate_claim_lineage(
+            state,
+            reason=f"claim frozen on hypothesis {args.hypothesis_id}: {args.reason}",
+        )
+        now = utc_now()
+        graph["claim_hypothesis_id"] = args.hypothesis_id
+        graph["claim_frozen_at"] = now
+        graph["revision"] += 1
+        graph["updated_at"] = now
+        write_research_graph(state, graph)
+        state["learning"]["claim_freeze"] = {
+            "hypothesis_id": args.hypothesis_id,
+            "graph_revision": graph["revision"],
+            "graph_sha256": state["learning"]["graph_sha256"],
+            "frozen_at": now,
+            "reason": args.reason,
+            "legacy_adoption": False,
+        }
+        state["learning"]["legacy_novelty_adopted"] = False
+        state["control"].update({"state": "needs_agent", "wake_at": None})
+        add_history(
+            state,
+            "claim_hypothesis_frozen",
+            hypothesis_id=args.hypothesis_id,
+            graph_sha256=state["learning"]["graph_sha256"],
+            invalidated_artifacts=invalidated,
+            reason=args.reason,
+        )
+        print(json.dumps(state["learning"]["claim_freeze"], indent=2))
 
 
 def require_text(payload: dict[str, Any], key: str, label: str) -> str:
@@ -1731,6 +2606,7 @@ def pivot_to_backup(
         )
     portfolio_path = artifact_file(state, "candidate_portfolio")
     portfolio = validate_candidate_portfolio(state, portfolio_path)
+    learning_graph = load_research_graph(state) if learning_enabled(state) else None
     candidates = portfolio["candidates"]
     backups = [candidate for candidate in candidates if candidate.get("status") == "backup"]
     if candidate_id:
@@ -1740,6 +2616,19 @@ def pivot_to_backup(
     if not backups:
         return None
     target = backups[0]
+    selected_learning_hypothesis = None
+    if learning_graph is not None:
+        target_hypotheses = [
+            item for item in learning_graph["hypotheses"] if item["candidate_id"] == target["id"]
+        ]
+        if not target_hypotheses:
+            raise CampaignError(
+                f"research graph has no hypothesis for promoted candidate {target['id']}"
+            )
+        selected_learning_hypothesis = next(
+            (item for item in target_hypotheses if item["id"] == target["id"]),
+            target_hypotheses[0],
+        )
     previous_id = portfolio["active_candidate_id"]
     for candidate in candidates:
         if candidate.get("id") == previous_id:
@@ -1788,6 +2677,33 @@ def pivot_to_backup(
         "mtime_ns": portfolio_path.stat().st_mtime_ns,
         "sha256": sha256_file(portfolio_path),
     }
+    learning_transition = None
+    if learning_graph is not None:
+        assert selected_learning_hypothesis is not None
+        selected = selected_learning_hypothesis
+        for hypothesis in learning_graph["hypotheses"]:
+            if hypothesis["candidate_id"] == previous_id and hypothesis["status"] in {"active", "backup"}:
+                hypothesis["status"] = "eliminated"
+            elif hypothesis["id"] == selected["id"]:
+                hypothesis["status"] = "active"
+            elif hypothesis["candidate_id"] == target["id"] and hypothesis["status"] == "active":
+                hypothesis["status"] = "backup"
+        learning_graph["active_hypothesis_ids"] = [selected["id"]]
+        learning_graph["claim_hypothesis_id"] = None
+        learning_graph["claim_frozen_at"] = None
+        learning_graph["revision"] += 1
+        learning_graph["updated_at"] = utc_now()
+        state["learning"]["claim_freeze"] = None
+        state["learning"]["legacy_novelty_adopted"] = False
+        state["learning"]["portfolio_refresh_required"] = False
+        write_research_graph(state, learning_graph)
+        learning_transition = {
+            "previous_hypothesis_ids": [
+                item["id"] for item in learning_graph["hypotheses"] if item["candidate_id"] == previous_id
+            ],
+            "active_hypothesis_id": selected["id"],
+            "graph_revision": learning_graph["revision"],
+        }
     invalidated = []
     for name in (
         "idea_report",
@@ -1826,6 +2742,7 @@ def pivot_to_backup(
         candidate_id=target["id"],
         reason=reason,
         invalidated_artifacts=invalidated,
+        learning_transition=learning_transition,
     )
     return str(target["id"])
 
@@ -1952,6 +2869,30 @@ def validate_novelty_audit(state: dict[str, Any], path: Path) -> dict[str, Any]:
         raise CampaignError("novelty audit is not bound to the recorded candidate portfolio")
     if candidate_id != portfolio["active_candidate_id"]:
         raise CampaignError("novelty audit candidate is not the active portfolio candidate")
+    if learning_enabled(state):
+        prior_record = state.get("artifacts", {}).get("novelty_audit") or {}
+        legacy_same_artifact = bool(
+            state["learning"].get("legacy_novelty_adopted")
+            and prior_record.get("sha256") == sha256_file(path)
+        )
+        if not legacy_same_artifact:
+            freeze = state["learning"].get("claim_freeze")
+            if not isinstance(freeze, dict):
+                raise CampaignError("freeze a hypothesis before writing a novelty audit")
+            graph = load_research_graph(state)
+            hypothesis_id = require_text(audit, "hypothesis_id", "novelty_audit")
+            if hypothesis_id != freeze.get("hypothesis_id") or hypothesis_id != graph.get(
+                "claim_hypothesis_id"
+            ):
+                raise CampaignError("novelty audit is not bound to the frozen hypothesis")
+            hypothesis = hypothesis_by_id(graph, hypothesis_id)
+            if hypothesis["candidate_id"] != candidate_id:
+                raise CampaignError("novelty audit hypothesis belongs to a different candidate")
+            graph_sha256 = require_text(audit, "research_graph_sha256", "novelty_audit")
+            if graph_sha256 != freeze.get("graph_sha256") or graph_sha256 != sha256_file(
+                canonical(state["learning"]["graph_path"], strict=True)
+            ):
+                raise CampaignError("novelty audit is not bound to the frozen research graph")
 
     primitives = require_nonempty_list(audit, "primitives", "novelty_audit")
     primitive_ids: set[str] = set()
@@ -2161,7 +3102,7 @@ def current_probe_binding(state: dict[str, Any]) -> dict[str, str]:
         raise CampaignError("the conditional contribution class is outside the mission")
     if audit["candidate_id"] != portfolio["active_candidate_id"]:
         raise CampaignError("conditional novelty review is not bound to the active candidate")
-    return {
+    binding = {
         "mission_sha256": state["mission_sha256"],
         "route_sha256": route["sha256"],
         "candidate_portfolio_sha256": sha256_file(portfolio_path),
@@ -2172,6 +3113,17 @@ def current_probe_binding(state: dict[str, Any]) -> dict[str, str]:
         "claim_class": review["claim_class"],
         "clearance": "conditional_probe",
     }
+    if learning_enabled(state):
+        freeze = state["learning"].get("claim_freeze")
+        if not isinstance(freeze, dict):
+            raise CampaignError("conditional novelty work requires a frozen hypothesis")
+        binding.update(
+            {
+                "hypothesis_id": freeze["hypothesis_id"],
+                "research_graph_sha256": freeze["graph_sha256"],
+            }
+        )
+    return binding
 
 
 def novelty_probe_experiments(
@@ -2465,6 +3417,16 @@ def current_claim_binding(state: dict[str, Any]) -> dict[str, str]:
                 "novelty_arbitration_sha256": sha256_file(arbitration_path),
             }
         )
+    if learning_enabled(state):
+        freeze = state["learning"].get("claim_freeze")
+        if not isinstance(freeze, dict):
+            raise CampaignError("claim-bearing work requires a frozen hypothesis")
+        binding.update(
+            {
+                "hypothesis_id": freeze["hypothesis_id"],
+                "research_graph_sha256": freeze["graph_sha256"],
+            }
+        )
     return binding
 
 
@@ -2483,8 +3445,12 @@ def require_experiment_claim_binding(state: dict[str, Any], experiment: dict[str
 
 
 def require_author_control(state: dict[str, Any], action: str) -> None:
-    if state["control"]["state"] in {"novelty_reviewer_running", "novelty_arbiter_running"}:
-        raise CampaignError(f"the independent novelty evaluator cannot {action}")
+    if state["control"]["state"] in {
+        "novelty_reviewer_running",
+        "novelty_arbiter_running",
+        *LEARNING_REVIEW_STATES,
+    }:
+        raise CampaignError(f"an independent evaluator cannot {action}")
 
 
 def require_phase_entry(state: dict[str, Any], phase: str) -> None:
@@ -2502,6 +3468,11 @@ def require_phase_entry(state: dict[str, Any], phase: str) -> None:
         validate_route(state)
     if phase == "novelty_review":
         validate_candidate_portfolio(state, artifact_file(state, "candidate_portfolio"))
+        if not learning_enabled(state):
+            raise CampaignError("initialize hypothesis evolution before novelty review")
+        graph = load_research_graph(state)
+        if not graph.get("claim_hypothesis_id") or not state["learning"].get("claim_freeze"):
+            raise CampaignError("freeze the selected hypothesis before novelty review")
     if PHASES.index(phase) >= PHASES.index("planning"):
         state["research_track"] = novelty_resolution(state)
 
@@ -2539,6 +3510,20 @@ def cmd_candidate_pivot(args: argparse.Namespace) -> None:
         require_current_skill(state)
         pin_missing_skill_reference(state)
         require_author_control(state, "pivot the active candidate")
+        if learning_enabled(state):
+            require_learning_cycle_clear(state)
+            if not args.finding_id:
+                raise CampaignError("candidate pivot requires an independently reviewed finding")
+            review = learning_failure_review_by_finding(state, args.finding_id)
+            attestation = state["learning"].get("reviews", {}).get(args.finding_id, {})
+            if not attestation.get("independent") or review.get("decision") == "reject":
+                raise CampaignError("candidate pivot lacks an accepted independent failure review")
+            if review.get("allowed_action") != "pivot":
+                raise CampaignError(
+                    f"failure review authorizes {review.get('allowed_action')}, not pivot"
+                )
+            if state["learning"].get("consumed_findings", {}).get(args.finding_id):
+                raise CampaignError("this finding has already produced a hypothesis mutation")
         candidate_id = pivot_to_backup(
             state,
             reason=args.reason,
@@ -2546,6 +3531,8 @@ def cmd_candidate_pivot(args: argparse.Namespace) -> None:
         )
         if candidate_id is None:
             raise CampaignError("candidate portfolio has no backup to promote; return to discovery")
+        if learning_enabled(state):
+            state["learning"]["consumed_findings"][args.finding_id] = candidate_id
         print(
             json.dumps(
                 {
@@ -2585,6 +3572,8 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             raise CampaignError("the cold novelty reviewer may record only novelty_review")
         if state["control"]["state"] == "novelty_arbiter_running" and args.name != "novelty_arbitration":
             raise CampaignError("the independent novelty arbiter may record only novelty_arbitration")
+        if state["control"]["state"] in LEARNING_REVIEW_STATES:
+            raise CampaignError("the independent failure critic may record only learning-review")
         novelty_artifacts = {
             "candidate_portfolio",
             "idea_report",
@@ -2639,6 +3628,17 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             invalidates_idea = bool(
                 previous_portfolio and previous_portfolio.get("sha256") != sha256_file(path)
             )
+            if learning_enabled(state) and (
+                previous_portfolio is None
+                or previous_portfolio.get("sha256") != sha256_file(path)
+            ):
+                state["learning"].update(
+                    {
+                        "portfolio_refresh_required": True,
+                        "claim_freeze": None,
+                        "legacy_novelty_adopted": False,
+                    }
+                )
             downstream = [
                 "novelty_audit",
                 "novelty_review",
@@ -2671,6 +3671,9 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             if path.suffix != ".json" or args.assurance != "provisional":
                 raise CampaignError("novelty_audit must be a provisional JSON artifact")
             validate_novelty_audit(state, path)
+            prior_record = state["artifacts"].get("novelty_audit") or {}
+            if learning_enabled(state) and prior_record.get("sha256") != sha256_file(path):
+                state["learning"]["legacy_novelty_adopted"] = False
             previous_audit = state["artifacts"].get("novelty_audit")
             if state["artifacts"].get("novelty_review") and (
                 not previous_audit or previous_audit.get("sha256") != sha256_file(path)
@@ -2763,7 +3766,16 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         require_current_skill(state)
         pin_missing_skill_reference(state)
         require_author_control(state, "register experiments")
+        require_learning_cycle_clear(state)
         require_experiment_novelty(state, args.stage)
+        evidence_role = args.evidence_role or DEFAULT_EVIDENCE_ROLE[args.stage]
+        if evidence_role not in research_learning.EVIDENCE_ROLES:
+            raise CampaignError(f"unsupported evidence role: {evidence_role}")
+        hypothesis_binding = experiment_hypothesis_binding(
+            state,
+            evidence_role=evidence_role,
+            hypothesis_id=args.hypothesis_id,
+        )
         claim_binding = (
             None
             if args.stage in {"sanity", "profile", "discovery"}
@@ -2823,6 +3835,8 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             "success_file": str(success_path),
             "depends_on": args.depends_on,
             "claim_binding": claim_binding,
+            "evidence_role": evidence_role,
+            "hypothesis_binding": hypothesis_binding,
             "attempts": [],
         }
         if args.stage == NOVELTY_PROBE_STAGE:
@@ -3575,6 +4589,7 @@ def cmd_cancel(args: argparse.Namespace) -> None:
         require_active=False,
         allow_expired=True,
     )
+    require_author_control(state, "cancel experiments")
     experiment = state["experiments"].get(args.id)
     if not experiment or not experiment.get("attempts"):
         raise CampaignError(f"experiment has no submitted attempt: {args.id}")
@@ -3597,6 +4612,7 @@ def cmd_cancel(args: argparse.Namespace) -> None:
             require_active=False,
             allow_expired=True,
         )
+        require_author_control(current, "cancel experiments")
         current_exp = current["experiments"][args.id]
         current_attempt = current_exp["attempts"][-1]
         if current_attempt.get("job_id") != job_id or current_attempt.get("status") not in JOB_ACTIVE:
@@ -3653,6 +4669,7 @@ def pbs_status(record: dict[str, str]) -> tuple[str, int | None]:
 def cmd_refresh(args: argparse.Namespace) -> None:
     state = load_state(args.root)
     require_approved(state, require_active=False, allow_expired=True)
+    require_author_control(state, "refresh PBS jobs")
     active: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for exp_id, experiment in state["experiments"].items():
         for attempt in experiment.get("attempts", []):
@@ -4018,6 +5035,8 @@ def cmd_worker_run(args: argparse.Namespace) -> None:
 
 def required_completion_artifacts(state: dict[str, Any]) -> tuple[str, ...]:
     required = list(REQUIRED_COMPLETION_ARTIFACTS)
+    if learning_enabled(state):
+        required.extend(("research_graph", "learning_ledger"))
     review_record = state.get("artifacts", {}).get("novelty_review")
     if review_record:
         review_path = canonical(review_record["path"])
@@ -4036,6 +5055,25 @@ def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
     missing = [name for name in required if name not in state["artifacts"]]
     if missing:
         raise CampaignError("cannot complete campaign; missing artifacts: " + ", ".join(missing))
+    if not learning_enabled(state):
+        raise CampaignError("cannot complete without the hypothesis-evolution learning workflow")
+    require_learning_cycle_clear(state)
+    graph = load_research_graph(state)
+    freeze = state["learning"].get("claim_freeze")
+    if not isinstance(freeze, dict) or graph.get("claim_hypothesis_id") != freeze.get(
+        "hypothesis_id"
+    ):
+        raise CampaignError("cannot complete without a current frozen claim hypothesis")
+    pending = pending_interpretation_ids(state)
+    if pending:
+        raise CampaignError("cannot complete with uninterpreted experiments: " + ", ".join(pending))
+    for entry in load_learning_ledger(state):
+        if entry.get("entry_type") == "interpretation" and entry.get("review_required"):
+            review = state["learning"].get("reviews", {}).get(entry.get("finding_id"), {})
+            if not review.get("independent"):
+                raise CampaignError(
+                    f"finding {entry.get('finding_id')} lacks an independent failure review"
+                )
     state["research_track"] = novelty_resolution(state)
     mission_path = artifact_file(state, "mission")
     if sha256_json(json_object(mission_path, "mission")) != state["mission_sha256"]:
@@ -4056,7 +5094,7 @@ def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
         stat = path.stat()
         if record.get("size_bytes") != stat.st_size or record.get("mtime_ns") != stat.st_mtime_ns:
             raise CampaignError(f"completion artifact changed after it was recorded: {name}: {path}")
-        if stat.st_size <= 0:
+        if stat.st_size <= 0 and name != "learning_ledger":
             raise CampaignError(f"completion artifact is empty: {name}: {path}")
     paper_source = canonical(state["artifacts"]["paper_source"]["path"])
     if paper_source.suffix != ".tex":
@@ -4101,7 +5139,11 @@ def cmd_handoff(args: argparse.Namespace) -> None:
         if args.state == "waiting_human":
             require_waiting_human_basis(state)
         evaluator = state["control"]["state"]
-        if evaluator in {"novelty_reviewer_running", "novelty_arbiter_running"} and args.state not in {
+        if evaluator in {
+            "novelty_reviewer_running",
+            "novelty_arbiter_running",
+            "failure_reviewer_running",
+        } and args.state not in {
             "needs_agent",
             "waiting_human",
             "paused",
@@ -4147,6 +5189,42 @@ def cmd_handoff(args: argparse.Namespace) -> None:
                 rebuttal_sha256=sha256_file(rebuttal_path),
                 invalidated_arbitration_sha256=(previous_arbitration or {}).get("sha256"),
             )
+        if args.state == "needs_failure_review":
+            if evaluator != "agent_running":
+                raise CampaignError("only the author thread may request a fresh failure review")
+            if not learning_enabled(state):
+                raise CampaignError("hypothesis evolution is not initialized")
+            finding_id = state["learning"].get("pending_failure_review")
+            if not finding_id:
+                raise CampaignError("no interpretation requires a failure review")
+            interpretation = learning_interpretation_by_finding(state, finding_id)
+            if not interpretation.get("review_required"):
+                raise CampaignError("the pending interpretation does not require an independent review")
+            git_workspace_info(canonical(state["workspace"], strict=True), require_clean=True)
+            requested_at = utc_now()
+            state["control"]["failure_review_requested_at"] = requested_at
+            state["control"]["failure_review_thread_id"] = None
+            state["learning"]["reviews"].setdefault(finding_id, {}).update(
+                {"requested": True, "requested_at": requested_at, "independent": False}
+            )
+            add_history(
+                state,
+                "failure_review_requested",
+                finding_id=finding_id,
+                interpretation_sha256=sha256_json(interpretation),
+            )
+        if (
+            args.state == "needs_agent"
+            and learning_enabled(state)
+            and state["learning"].get("pending_failure_review")
+            and evaluator != "failure_reviewer_running"
+        ):
+            raise CampaignError("handoff to needs_failure_review before continuing adaptive research")
+        if args.state == "needs_agent" and evaluator == "failure_reviewer_running":
+            finding_id = state["learning"].get("pending_failure_review")
+            if not finding_id:
+                raise CampaignError("failure reviewer has no pending finding")
+            learning_failure_review_by_finding(state, finding_id)
         if (
             args.state == "needs_agent"
             and state["phase"] == "novelty_review"
@@ -4281,6 +5359,60 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("root")
     status.set_defaults(func=cmd_status)
 
+    learning_init = sub.add_parser(
+        "learning-init",
+        help="initialize the bounded hypothesis graph and learning ledger",
+    )
+    learning_init.add_argument("root")
+    learning_init.add_argument("--graph-file")
+    learning_init.add_argument("--adopt-current-claim", action="store_true")
+    learning_init.add_argument("--reason", required=True)
+    learning_init.set_defaults(func=cmd_learning_init)
+
+    learning_reseed = sub.add_parser(
+        "learning-reseed",
+        help="preserve old learning and seed a replacement portfolio into the same graph file",
+    )
+    learning_reseed.add_argument("root")
+    learning_reseed.add_argument("--reason", required=True)
+    learning_reseed.set_defaults(func=cmd_learning_reseed)
+
+    learning_record = sub.add_parser(
+        "learning-record",
+        help="interpret one terminal scientific experiment",
+    )
+    learning_record.add_argument("root")
+    learning_record.add_argument("--file", required=True)
+    learning_record.set_defaults(func=cmd_learning_record)
+
+    learning_review = sub.add_parser(
+        "learning-review",
+        help="record a fresh independent review of one surprising or negative finding",
+    )
+    learning_review.add_argument("root")
+    learning_review.add_argument("--file", required=True)
+    learning_review.set_defaults(func=cmd_learning_review)
+
+    hypothesis_fork = sub.add_parser(
+        "hypothesis-fork",
+        help="create an independently authorized refinement or parallel branch",
+    )
+    hypothesis_fork.add_argument("root")
+    hypothesis_fork.add_argument("--parent-id", required=True)
+    hypothesis_fork.add_argument("--finding-id", required=True)
+    hypothesis_fork.add_argument("--kind", choices=("refine", "branch"), required=True)
+    hypothesis_fork.add_argument("--file", required=True)
+    hypothesis_fork.set_defaults(func=cmd_hypothesis_fork)
+
+    claim_freeze = sub.add_parser(
+        "claim-freeze",
+        help="freeze one active hypothesis before novelty and confirmatory evidence",
+    )
+    claim_freeze.add_argument("root")
+    claim_freeze.add_argument("--hypothesis-id", required=True)
+    claim_freeze.add_argument("--reason", required=True)
+    claim_freeze.set_defaults(func=cmd_claim_freeze)
+
     preflight = sub.add_parser("preflight", help="run live project, SU, inode, and campaign-file checks")
     preflight.add_argument("root")
     preflight.set_defaults(func=cmd_preflight)
@@ -4303,6 +5435,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pivot.add_argument("root")
     pivot.add_argument("--candidate-id", help="specific backup to promote; default is portfolio order")
+    pivot.add_argument("--finding-id", help="independently reviewed finding authorizing the pivot")
     pivot.add_argument("--reason", required=True)
     pivot.set_defaults(func=cmd_candidate_pivot)
 
@@ -4344,6 +5477,12 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--expected-files", type=int, required=True)
     experiment.add_argument("--success-file", required=True)
     experiment.add_argument("--depends-on", action="append", default=[])
+    experiment.add_argument(
+        "--evidence-role",
+        choices=tuple(sorted(research_learning.EVIDENCE_ROLES)),
+        help="exploratory, diagnostic, confirmatory, or replication; defaults from stage",
+    )
+    experiment.add_argument("--hypothesis-id", help="active hypothesis to test")
     experiment.add_argument("--command-json", required=True, help="JSON array of command arguments; no shell evaluation")
     experiment.set_defaults(func=cmd_experiment_add)
 
@@ -4413,6 +5552,7 @@ def build_parser() -> argparse.ArgumentParser:
             "needs_agent",
             "needs_novelty_review",
             "needs_novelty_arbitration",
+            "needs_failure_review",
             "waiting_pbs",
             "waiting_human",
             "waiting_time",

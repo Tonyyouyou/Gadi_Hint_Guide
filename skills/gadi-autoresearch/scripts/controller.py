@@ -32,6 +32,7 @@ RUNNING_STATES = {
     "agent_running": ("author", "needs_agent"),
     "novelty_reviewer_running": ("novelty_reviewer", "needs_novelty_review"),
     "novelty_arbiter_running": ("novelty_arbiter", "needs_novelty_arbitration"),
+    "failure_reviewer_running": ("failure_reviewer", "needs_failure_review"),
 }
 
 
@@ -94,6 +95,9 @@ def ensure_control_schema(root: Path) -> None:
     with campaign.locked_state(root) as state:
         state["control"].setdefault("lease", None)
         state["control"].setdefault("recovery", recovery_defaults())
+        state["control"].setdefault("failure_review_thread_id", None)
+        state["control"].setdefault("failure_review_requested_at", None)
+        state.setdefault("learning", None)
 
 
 def clear_recovery(state: dict[str, Any]) -> None:
@@ -225,6 +229,14 @@ def scientific_fallback(state: dict[str, Any], reason: str) -> str:
         if state["artifacts"].pop(name, None) is not None:
             invalidated.append(name)
     state.pop("research_track", None)
+    if campaign.learning_enabled(state):
+        state["learning"].update(
+            {
+                "portfolio_refresh_required": True,
+                "claim_freeze": None,
+                "legacy_novelty_adopted": False,
+            }
+        )
     state["phase"] = "discovery"
     state["control"].update(
         {
@@ -334,11 +346,15 @@ Current adapter packet:
 
 During territory and discovery, map task/model/lever/evidence opportunities, run only bounded observation probes, and resolve an explicit dependency-complete route with campaign.py route-set before portfolio. Inspect every selected adapter's required evidence, discovery questions, novelty traps, and linked references. Treat human_evaluation=conditional as a claim-dependent decision: any perceived-quality or preference claim must select the required perceptual/human evidence route before leaving discovery. Write one compact DISCOVERY_REPORT.md and a machine-readable CANDIDATE_PORTFOLIO.json with the mission-required number of viable candidates. Each candidate needs an observation, causal hypothesis, mechanism, predicted signature, falsifier, cheap distinguishing test, nearest-work delta, and estimated SU/job/file cost. Do not promote a branded idea without an observed or formally defined problem.
 
+After recording the candidate portfolio, initialize the two-file hypothesis-evolution workflow with campaign.py learning-init. Read RESEARCH_GRAPH.json and LEARNING_LEDGER.jsonl on every turn. Freeze one active hypothesis with claim-freeze before novelty review. Register every scientific experiment with an explicit evidence role and hypothesis id. Exploratory and diagnostic work may discover a better question; confirmatory and replication work may support a frozen paper claim. Never relabel exploratory evidence as confirmation after seeing it.
+
+Every terminal scientific experiment must receive exactly one structured interpretation through campaign.py learning-record before adaptive work continues. Separate technical invalidity from scientific falsification. Technical failures use repair and do not mutate the scientific hypothesis. Valid falsification, qualification, surprise, or a proposed refine/branch/pivot/stop must hand off to needs_failure_review. The controller then launches a fresh critic. Only an independently attested review may authorize hypothesis-fork or a portfolio pivot. A child hypothesis must cite the generating finding, while that generating experiment remains evidence about its parent and is never confirmation for the child. Keep at most three active branches; prune on evidence, not taste. Freeze a materially changed claim and repeat novelty review before confirmatory experiments.
+
 Before planning or claim-bearing experiments, read {NOVELTY_REFERENCE} and satisfy the machine-enforced novelty gate. Bind the audit to the mission, route, candidate portfolio, and idea report. Describe the active candidate as mechanism primitives without its coined name, search exact/synonym/task/adjacent/combination/code/citation-neighbor routes, compare at least three checked primary sources, and write the bound IDEA_REPORT and NOVELTY_AUDIT.json artifacts. Never write or register NOVELTY_REVIEW.json from the author thread: enter novelty_review and hand off with state needs_novelty_review so the controller launches a fresh adversarial reviewer. A legacy derivative/rejected review is not automatically upgraded under this skill revision: either refine/replace the candidate or produce a fresh bound audit and request a fresh review.
 
 The cold reviewer has three current outcomes. clear_to_plan opens planning. exact_prior_reject requires a checked functionally equivalent prior and sends the candidate back to discovery/portfolio. conditional_probe means no exact prior was found but the paper-facing delta depends on an empirical interaction. In that case, remain in novelty_review and run only stage=novelty_probe experiments bound to the review. Current hard caps are:
 {novelty_probe_packet}
-After one to three completed probes, write the exact bound NOVELTY_REBUTTAL.json schema, register it as provisional, and hand off with state needs_novelty_arbitration. Never write NOVELTY_ARBITRATION.json yourself. A fresh third Codex thread decides clear_to_plan or exact_prior_reject. No pilot, main, ablation, paper-facing baseline, or full implementation work is allowed until final clearance. Preserve the observation when rejected. Use campaign.py candidate-pivot to atomically promote a ranked backup; do not hand-edit several hash-bound artifacts. If every backup is exhausted, return to discovery and generate a new portfolio from the accumulated negative evidence. Never silently downgrade a requested method, architecture, objective, representation, system, data, evaluation, empirical, or theory contribution into an application, reproduction, or diagnostic paper.
+After one to three completed probes, write the exact bound NOVELTY_REBUTTAL.json schema, register it as provisional, and hand off with state needs_novelty_arbitration. Never write NOVELTY_ARBITRATION.json yourself. A fresh third Codex thread decides clear_to_plan or exact_prior_reject. No pilot, main, ablation, paper-facing baseline, or full implementation work is allowed until final clearance. Preserve the observation when rejected. Use campaign.py candidate-pivot to atomically promote a ranked backup; do not hand-edit several hash-bound artifacts. If every backup is exhausted, return to discovery, generate and register a new portfolio from the accumulated negative evidence, then use campaign.py learning-reseed before freezing another claim. Never silently downgrade a requested method, architecture, objective, representation, system, data, evaluation, empirical, or theory contribution into an application, reproduction, or diagnostic paper.
 
 Before final novelty clearance, candidate-independent environment/data/model setup is permitted only through campaign.py external-submit within its discovery-infrastructure recovery envelope. A failed same-stage attempt may be retried under a new immutable experiment ID only after changing the PBS script; the CLI records retry lineage and still charges every attempt against job/SU budgets. Environments must be assembled in PBS jobfs, smoke-tested for /bin/sh, Python, framework imports, and container execution, then published as one immutable .sqsh under /g/data/wa66/Xiangyu/enviroment_cache. Datasets must be downloaded/expanded in PBS jobfs and published as packed objects under /g/data/wa66/Xiangyu/Data. A public pretrained model may be acquired only when approval.allow_model_publish=true: use stage=model on copyq, pin an immutable source revision and license, download and validate in PBS jobfs, invoke the audited packer, and publish exactly one .tar.zst directly under /g/data/wa66/Xiangyu/Data/models. Register that archive as a data input, and expand it only into each compute job's PBS jobfs. Never persist expanded dependency trees, dataset trees, model repositories, model shards, or Hugging Face/package caches.
 
@@ -390,6 +406,47 @@ This is a fresh third Codex thread, distinct from both author and cold reviewer.
 Judge the paper-facing contribution, not whether each primitive exists independently. Check that the probe is valid, that the stated naive A+B baseline is faithful and competitive, that the distinguishing result supports a non-obvious interaction rather than tuning or branding, and that the evidence addresses every blocking reviewer objection. Transfer to another modality is not automatically novel or derivative; decide from the mechanism and evidence. Search additional primary sources when needed.
 
 Write the exact NOVELTY_ARBITRATION.json schema from {NOVELTY_REFERENCE} to {root}/NOVELTY_ARBITRATION.json and register it as provisional with campaign.py. The only decisions are clear_to_plan and exact_prior_reject. clear_to_plan requires a mission-accepted primary contribution, no blocking issues, and no exact prior. exact_prior_reject requires a checked primary source that is functionally equivalent, with exact_prior.functionally_equivalent=true and concrete equivalence evidence. If the evidence is weak or the probe is invalid but no exact prior exists, do not invent a hard rejection and do not request a human novelty judgment: hand off to needs_agent with a reason beginning `inconclusive novelty arbitration:` so the controller can promote a backup or return to discovery. Hand off to needs_agent after recording a valid arbitration. The controller rejects reused threads, changed inputs, workspace changes, incomplete schemas, and missing handoffs."""
+
+
+def failure_reviewer_prompt(
+    root: Path,
+    finding_id: str,
+    hypothesis: dict[str, Any],
+    experiment: dict[str, Any],
+) -> str:
+    blind_packet = json.dumps(
+        {
+            "finding_id": finding_id,
+            "hypothesis": {
+                "id": hypothesis["id"],
+                "observation": hypothesis["observation"],
+                "causal_hypothesis": hypothesis["causal_hypothesis"],
+                "mechanism": hypothesis["mechanism"],
+                "predictions": hypothesis["predictions"],
+                "falsifiers": hypothesis["falsifiers"],
+                "assumptions": hypothesis["assumptions"],
+            },
+            "experiment": {
+                "id": experiment["id"],
+                "stage": experiment["stage"],
+                "evidence_role": experiment.get("evidence_role"),
+                "command": experiment["command"],
+                "source_commit": experiment.get("source_commit"),
+                "success_file": experiment.get("success_file"),
+                "attempts": experiment.get("attempts", []),
+            },
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    return f"""Use $gadi-autoresearch as the fresh failure critic for {root}.
+You are not the author. Do not edit the source workspace, mutate hypotheses, change phases or approval, register experiments, submit PBS work, or browse for a new idea. Read campaign.json and {WORKFLOW_REFERENCE}. First inspect the registered experiment, raw compact result or success marker, attempt metadata, and any bounded logs without reading the author's interpretation line in LEARNING_LEDGER.jsonl. Form an independent validity and causal assessment from this blind packet:
+
+{blind_packet}
+
+Only after fixing that preliminary assessment, read the interpretation for finding {finding_id}. Decide accept, revise, or reject. Distinguish implementation failure, assumption failure, mechanism failure, scope qualification, ceiling effect, anomaly, and inconclusive evidence. Authorize refine, branch, or pivot only when the result is scientifically valid, alternative explanations are addressed, and the change is material. A technical failure should authorize repair without a scientific update. Do not let the evidence that generated a child hypothesis count as confirmation for that child.
+
+Write one temporary JSON object matching the failure_review schema in {WORKFLOW_REFERENCE}, call campaign.py learning-review --file on it, remove the temporary file, and hand off to needs_agent with a concrete assessment. The controller will reject a reused author thread, changed source workspace, changed interpretation, incomplete schema, or missing handoff."""
 
 
 def codex_prefix(
@@ -470,6 +527,30 @@ def novelty_arbiter_codex_command(
         str(root),
     ]
     return [*common, "--json", "-C", str(workspace), novelty_arbiter_prompt(root, rebuttal)]
+
+
+def failure_reviewer_codex_command(
+    codex_bin: str,
+    workspace: Path,
+    root: Path,
+    finding_id: str,
+    hypothesis: dict[str, Any],
+    experiment: dict[str, Any],
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> list[str]:
+    common = [
+        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+        "--add-dir",
+        str(root),
+    ]
+    return [
+        *common,
+        "--json",
+        "-C",
+        str(workspace),
+        failure_reviewer_prompt(root, finding_id, hypothesis, experiment),
+    ]
 
 
 def run_codex_canary(
@@ -625,7 +706,7 @@ def run_agent(
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "thread.started":
+            if isinstance(event, dict) and event.get("type") == "thread.started":
                 candidate = nested_thread_id(event)
                 if candidate:
                     discovered_thread = candidate
@@ -829,7 +910,7 @@ def run_novelty_reviewer(
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "thread.started":
+            if isinstance(event, dict) and event.get("type") == "thread.started":
                 candidate = nested_thread_id(event)
                 if candidate:
                     discovered_thread = candidate
@@ -1169,7 +1250,7 @@ def run_novelty_arbiter(
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "thread.started":
+            if isinstance(event, dict) and event.get("type") == "thread.started":
                 candidate = nested_thread_id(event)
                 if candidate:
                     discovered_thread = candidate
@@ -1299,6 +1380,328 @@ def run_novelty_arbiter(
         )
 
 
+def run_failure_reviewer(
+    root: Path,
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    state = campaign.load_state(root)
+    campaign.require_approved(state, "allow_auto_agent")
+    campaign.require_current_skill(state)
+    if int(state["control"]["agent_turns"]) >= int(state["approval"]["max_agent_turns"]):
+        pause_campaign(root, "approved Codex turn budget exhausted before failure review")
+        return
+    try:
+        if not campaign.learning_enabled(state):
+            raise campaign.CampaignError("hypothesis evolution is not initialized")
+        finding_id = state["learning"].get("pending_failure_review")
+        if not finding_id:
+            raise campaign.CampaignError("no failure-review finding is pending")
+        interpretation = campaign.learning_interpretation_by_finding(state, finding_id)
+        if not interpretation.get("review_required"):
+            raise campaign.CampaignError("pending finding does not require independent review")
+        experiment = state["experiments"][interpretation["experiment_id"]]
+        graph = campaign.load_research_graph(state)
+        hypothesis = campaign.hypothesis_by_id(graph, interpretation["hypothesis_id"])
+        interpretation_sha256 = campaign.sha256_json(interpretation)
+        experiment_sha256 = campaign.sha256_json(experiment)
+        hypothesis_sha256 = campaign.sha256_json(hypothesis)
+        if interpretation.get("result_sha256"):
+            success = campaign.canonical(experiment["success_file"], strict=True)
+            if campaign.sha256_file(success) != interpretation["result_sha256"]:
+                raise campaign.CampaignError("experiment result changed after interpretation")
+    except (campaign.CampaignError, KeyError, OSError) as exc:
+        schedule_recovery(
+            root,
+            category="failure_review_input",
+            role="author",
+            target_state="needs_agent",
+            reason=f"failure-review input validation failed: {exc}",
+        )
+        return
+    author_thread_id = state["control"].get("thread_id")
+    forbidden_reviewer_threads = {
+        value
+        for value in (
+            author_thread_id,
+            interpretation.get("author_thread_id"),
+            *(
+                review.get("reviewer_thread_id")
+                for review in state["learning"].get("reviews", {}).values()
+                if isinstance(review, dict)
+            ),
+        )
+        if value
+    }
+    requested_at = state["control"].get("failure_review_requested_at")
+    if not author_thread_id:
+        schedule_recovery(
+            root,
+            category="failure_review_author_thread",
+            role="author",
+            target_state="needs_agent",
+            reason="failure review requires a recorded author thread ID",
+        )
+        return
+    try:
+        campaign.live_preflight(state)
+    except (campaign.CampaignError, OSError) as exc:
+        schedule_recovery(
+            root,
+            category="failure_review_preflight",
+            role="failure_reviewer",
+            target_state="needs_failure_review",
+            reason=f"failure-review preflight failed: {exc}",
+        )
+        return
+    workspace = campaign.canonical(state["workspace"], strict=True)
+    campaign.validate_workspace(workspace)
+    try:
+        workspace_commit = campaign.git_workspace_info(workspace, require_clean=True)["commit"]
+    except (campaign.CampaignError, OSError) as exc:
+        schedule_recovery(
+            root,
+            category="failure_review_workspace",
+            role="author",
+            target_state="needs_agent",
+            reason=f"failure reviewer requires a clean source workspace: {exc}",
+        )
+        return
+    if not shutil.which(codex_bin):
+        schedule_recovery(
+            root,
+            category="codex_unavailable",
+            role="failure_reviewer",
+            target_state="needs_failure_review",
+            reason=f"Codex executable is unavailable: {codex_bin}",
+        )
+        return
+
+    with campaign.locked_state(root) as current:
+        if current["status"] != "active" or current["control"]["state"] != "needs_failure_review":
+            return
+        campaign.require_approved(current, "allow_auto_agent")
+        campaign.require_current_skill(current)
+        current_finding = current.get("learning", {}).get("pending_failure_review")
+        if current_finding != finding_id:
+            current["control"].update(
+                {"state": "needs_agent", "reason": "failure-review finding changed before launch"}
+            )
+            return
+        current_interpretation = campaign.learning_interpretation_by_finding(current, finding_id)
+        if campaign.sha256_json(current_interpretation) != interpretation_sha256:
+            current["control"].update(
+                {"state": "needs_agent", "reason": "failure-review interpretation changed before launch"}
+            )
+            return
+        if campaign.sha256_json(current["experiments"][interpretation["experiment_id"]]) != experiment_sha256:
+            current["control"].update(
+                {"state": "needs_agent", "reason": "failure-review experiment changed before launch"}
+            )
+            return
+        current["control"].update(
+            {
+                "state": "failure_reviewer_running",
+                "reason": f"controller launched fresh critic for {finding_id}",
+                "lease": {
+                    "role": "failure_reviewer",
+                    "target_state": "needs_failure_review",
+                    "pid": None,
+                    "host": socket.gethostname(),
+                    "started_at": campaign.utc_now(),
+                },
+            }
+        )
+        campaign.add_history(
+            current,
+            "controller_failure_review_started",
+            finding_id=finding_id,
+            interpretation_sha256=interpretation_sha256,
+            author_thread_id=author_thread_id,
+        )
+
+    command = failure_reviewer_codex_command(
+        codex_bin,
+        workspace,
+        root,
+        finding_id,
+        hypothesis,
+        experiment,
+        model,
+        reasoning_effort,
+    )
+    log_path = root / "controller.log"
+    rotate_log(log_path)
+    discovered_thread = None
+    log = log_path.open("a", encoding="utf-8")
+    returncode = 1
+    try:
+        log.write(
+            f"\n[{campaign.utc_now()}] launch failure reviewer for {finding_id}: "
+            f"model={model or 'config default'} "
+            f"reasoning_effort={reasoning_effort or 'config default'}\n"
+        )
+        log.flush()
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            schedule_recovery(
+                root,
+                category="failure_review_launch",
+                role="failure_reviewer",
+                target_state="needs_failure_review",
+                reason=f"failed to launch failure reviewer: {exc}",
+            )
+            return
+        record_lease(root, "failure_reviewer", "needs_failure_review", process.pid)
+        assert process.stdout is not None
+        for line in process.stdout:
+            log.write(line)
+            if log.tell() >= MAX_LOG_BYTES:
+                log.flush()
+                log.close()
+                rotate_log(log_path)
+                log = log_path.open("a", encoding="utf-8")
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "thread.started":
+                candidate_thread = nested_thread_id(event)
+                if candidate_thread:
+                    discovered_thread = candidate_thread
+        process.stdout.close()
+        returncode = process.wait()
+        log.write(f"[{campaign.utc_now()}] failure-review exit: {returncode}\n")
+    finally:
+        log.close()
+
+    recovery_request: tuple[str, str] | None = None
+    with campaign.locked_state(root) as updated:
+        updated["control"]["agent_turns"] += 1
+        updated["control"]["last_agent_at"] = campaign.utc_now()
+        updated["control"]["lease"] = None
+        failure: str | None = None
+        review: dict[str, Any] | None = None
+        if returncode != 0:
+            failure = f"failure reviewer exited with status {returncode}; inspect controller.log"
+        elif not discovered_thread:
+            failure = "failure reviewer returned no thread ID"
+        elif discovered_thread in forbidden_reviewer_threads:
+            failure = "failure reviewer reused an author or prior reviewer thread instead of a fresh context"
+        else:
+            try:
+                current_interpretation = campaign.learning_interpretation_by_finding(
+                    updated, finding_id
+                )
+                if campaign.sha256_json(current_interpretation) != interpretation_sha256:
+                    raise campaign.CampaignError("interpretation changed during failure review")
+                current_experiment = updated["experiments"][interpretation["experiment_id"]]
+                if campaign.sha256_json(current_experiment) != experiment_sha256:
+                    raise campaign.CampaignError("registered experiment changed during failure review")
+                current_graph = campaign.load_research_graph(updated)
+                current_hypothesis = campaign.hypothesis_by_id(
+                    current_graph, interpretation["hypothesis_id"]
+                )
+                if campaign.sha256_json(current_hypothesis) != hypothesis_sha256:
+                    raise campaign.CampaignError("hypothesis changed during failure review")
+                if interpretation.get("result_sha256"):
+                    current_success = campaign.canonical(
+                        current_experiment["success_file"], strict=True
+                    )
+                    if campaign.sha256_file(current_success) != interpretation["result_sha256"]:
+                        raise campaign.CampaignError("experiment result changed during failure review")
+                review = campaign.learning_failure_review_by_finding(updated, finding_id)
+                if review.get("interpretation_sha256") != interpretation_sha256:
+                    raise campaign.CampaignError("failure review is bound to another interpretation")
+                if requested_at and campaign.parse_time(review["recorded_at"]) < campaign.parse_time(
+                    requested_at
+                ):
+                    raise campaign.CampaignError("failure reviewer reused a pre-request review")
+                current_workspace = campaign.git_workspace_info(workspace, require_clean=True)
+                if current_workspace["commit"] != workspace_commit:
+                    raise campaign.CampaignError("failure reviewer changed the source workspace")
+            except (campaign.CampaignError, OSError) as exc:
+                failure = f"failure-review validation failed: {exc}"
+        if not failure and updated["control"]["state"] == "failure_reviewer_running":
+            failure = "failure reviewer exited without the required campaign handoff"
+        if not failure and updated["control"]["state"] not in {"needs_agent", "paused"}:
+            failure = f"failure reviewer used an invalid handoff: {updated['control']['state']}"
+        if failure:
+            recovery_request = ("failure_review_turn", failure)
+        else:
+            assert review is not None and discovered_thread is not None
+            entries = campaign.load_learning_ledger(updated)
+            for entry in entries:
+                if entry.get("entry_type") == "failure_review" and entry.get(
+                    "finding_id"
+                ) == finding_id:
+                    entry.update(
+                        {
+                            "independent": True,
+                            "reviewer_thread_id": discovered_thread,
+                            "author_thread_id": author_thread_id,
+                            "workspace_commit": workspace_commit,
+                            "experiment_sha256": experiment_sha256,
+                            "hypothesis_sha256": hypothesis_sha256,
+                            "attested_at": campaign.utc_now(),
+                        }
+                    )
+            campaign.rewrite_learning_ledger(updated, entries)
+            updated["learning"]["reviews"][finding_id] = {
+                "independent": True,
+                "decision": review["decision"],
+                "allowed_action": review["allowed_action"],
+                "material_change": review["material_change"],
+                "interpretation_sha256": interpretation_sha256,
+                "reviewer_thread_id": discovered_thread,
+                "author_thread_id": author_thread_id,
+                "workspace_commit": workspace_commit,
+                "experiment_sha256": experiment_sha256,
+                "hypothesis_sha256": hypothesis_sha256,
+                "attested_at": campaign.utc_now(),
+            }
+            updated["learning"]["pending_failure_review"] = None
+            updated["control"]["failure_review_thread_id"] = discovered_thread
+            updated["control"].update(
+                {
+                    "state": "needs_agent",
+                    "reason": (
+                        f"fresh failure review {review['decision']} authorizes "
+                        f"{review['allowed_action']} for {finding_id}"
+                    ),
+                }
+            )
+            clear_recovery(updated)
+        campaign.add_history(
+            updated,
+            "failure_review_turn_finished",
+            returncode=returncode,
+            finding_id=finding_id,
+            reviewer_thread_id=discovered_thread,
+            author_thread_id=author_thread_id,
+            validated=not failure,
+            failure=failure,
+        )
+    if recovery_request:
+        category, reason = recovery_request
+        schedule_recovery(
+            root,
+            category=category,
+            role="failure_reviewer",
+            target_state="needs_failure_review",
+            reason=reason,
+        )
+
+
 def describe_action(state: dict[str, Any]) -> str:
     control = state["control"]["state"]
     if state["status"] != "active":
@@ -1309,6 +1712,8 @@ def describe_action(state: dict[str, Any]) -> str:
         return "launch one fresh adversarial novelty-review thread"
     if control == "needs_novelty_arbitration":
         return "launch one fresh independent novelty-arbitration thread"
+    if control == "needs_failure_review":
+        return "launch one fresh independent failure-critic thread"
     if control == "waiting_pbs":
         return "refresh PBS no more than once every 600 seconds"
     if control == "waiting_time":
@@ -1359,6 +1764,8 @@ def tick(
         run_novelty_reviewer(root, codex_bin, model, reasoning_effort)
     elif control == "needs_novelty_arbitration":
         run_novelty_arbiter(root, codex_bin, model, reasoning_effort)
+    elif control == "needs_failure_review":
+        run_failure_reviewer(root, codex_bin, model, reasoning_effort)
     return campaign.load_state(root)["status"] == "active"
 
 

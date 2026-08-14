@@ -1,4 +1,4 @@
 interface:
   display_name: "Gadi Autoresearch"
-  short_description: "Evidence-led research with extensible domain adapters"
-  default_prompt: "Use $gadi-autoresearch to turn this research mission into a bounded, resumable Gadi campaign, discover and audit competing opportunities with the appropriate domain adapters, and continue through validated experiments and paper writing."
+  short_description: "Hypothesis-evolving research on Gadi"
+  default_prompt: "Use $gadi-autoresearch to run this bounded, resumable Gadi campaign through evidence-led discovery, versioned hypothesis evolution, independent failure and novelty review, validated experiments, and LaTeX paper writing."

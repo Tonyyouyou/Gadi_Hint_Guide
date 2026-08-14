@@ -37,6 +37,7 @@ Before final completion:
 6. **Compilation check**: clean LaTeX build succeeds, references resolve, figures exist, and the final PDF is nonempty/readable.
 7. **Human-evidence check**: every perceptual or preference claim has accepted real evidence when the route requires it; no ratings or participant records were invented.
 8. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, population limits, and unresolved risks appear in the paper.
+9. **Learning-lineage check**: every terminal scientific experiment has one interpretation, every required failure review is independently attested, the final claim is frozen on the current hypothesis version, and no generating evidence is reused as confirmation for its child.
 
 Semantic audits performed only by fresh Codex reviewers remain `provisional`. Deterministic compilation, schema, metric-trace, and file checks may be recorded as `deterministic`. Do not upgrade provisional science to submission-ready wording.
 
@@ -50,6 +51,8 @@ Record these canonical names with `campaign.py artifact`:
 | `research_brief` | `RESEARCH_BRIEF.md` |
 | `discovery_report` | `DISCOVERY_REPORT.md` |
 | `candidate_portfolio` | `CANDIDATE_PORTFOLIO.json` |
+| `research_graph` | `RESEARCH_GRAPH.json` |
+| `learning_ledger` | `LEARNING_LEDGER.jsonl` |
 | `idea_report` | `IDEA_REPORT.md` |
 | `novelty_audit` | `NOVELTY_AUDIT.json` |
 | `novelty_review` | `NOVELTY_REVIEW.json` |

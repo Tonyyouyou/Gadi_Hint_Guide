@@ -457,6 +457,156 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(state["control"]["state"], "needs_agent")
         self.assertEqual(state["control"]["agent_turns"], 1)
 
+    def test_controller_attests_fresh_failure_critic_before_adaptation(self) -> None:
+        review = self.prepare_novelty_review()
+        with campaign.locked_state(self.root) as current:
+            campaign.record_file_artifact(
+                current, "novelty_review", review, assurance="provisional"
+            )
+            audit = campaign.artifact_file(current, "novelty_audit")
+            current["artifacts"]["novelty_review"].update(
+                {
+                    "cold_review": True,
+                    "review_thread_id": "novelty-review-thread",
+                    "author_thread_id": "author-thread",
+                    "reviewed_audit_sha256": campaign.sha256_file(audit),
+                }
+            )
+            current["control"].update(
+                {"state": "needs_agent", "novelty_review_thread_id": "novelty-review-thread"}
+            )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "learning-init",
+                        str(self.root),
+                        "--adopt-current-claim",
+                        "--reason",
+                        "unit-test migration",
+                    ]
+                ),
+                0,
+            )
+        state = campaign.load_state(self.root)
+        binding = campaign.experiment_hypothesis_binding(
+            state,
+            evidence_role="diagnostic",
+            hypothesis_id="candidate-one",
+        )
+        success = self.root / "runs" / "diagnostic-one" / "metrics.json"
+        success.parent.mkdir(parents=True)
+        success.write_text('{"latency":1.0}\n', encoding="utf-8")
+        source_commit = campaign.git_workspace_info(self.workspace)["commit"]
+        with campaign.locked_state(self.root) as current:
+            current["experiments"]["diagnostic-one"] = {
+                "id": "diagnostic-one",
+                "stage": "sanity",
+                "mode": "batch",
+                "status": "completed",
+                "command": ["python", "probe.py"],
+                "source_commit": source_commit,
+                "success_file": str(success),
+                "evidence_role": "diagnostic",
+                "hypothesis_binding": binding,
+                "attempts": [],
+            }
+        interpretation = self.base / "interpretation.json"
+        interpretation.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "finding_id": "surprising-diagnostic",
+                    "experiment_id": "diagnostic-one",
+                    "hypothesis_id": "candidate-one",
+                    "evidence_role": "diagnostic",
+                    "validity": "valid",
+                    "outcome": "unexpected",
+                    "expected": "One stable latency regime.",
+                    "observed": "Two reproducible latency regimes.",
+                    "surprise": "The workload boundary changes the mechanism signature.",
+                    "alternative_explanations": ["Measurement mode switching."],
+                    "assumption_updates": [],
+                    "information_gain": "high",
+                    "proposed_delta": "Branch a workload-conditioned mechanism.",
+                    "next_action": "branch",
+                    "discriminating_test": "Repeat with a predeclared workload split.",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    ["learning-record", str(self.root), "--file", str(interpretation)]
+                ),
+                0,
+            )
+        with campaign.locked_state(self.root) as current:
+            current["control"].update({"state": "agent_running", "thread_id": "author-thread"})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                campaign.main(
+                    [
+                        "handoff",
+                        str(self.root),
+                        "--state",
+                        "needs_failure_review",
+                        "--reason",
+                        "valid surprise needs a fresh critic",
+                    ]
+                ),
+                0,
+            )
+
+        review = self.base / "failure-review.json"
+        review.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "finding_id": "surprising-diagnostic",
+                    "decision": "accept",
+                    "failure_class": "anomaly",
+                    "allowed_action": "branch",
+                    "material_change": True,
+                    "validity_assessment": "The registered output supports a valid anomaly.",
+                    "rationale": "The parent remains viable while a parallel mechanism is tested.",
+                    "required_test": "Use an independent workload split.",
+                    "alternative_explanations": ["A measurement regime could still explain the modes."],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fake_codex = self.base / "fake-failure-critic"
+        cli = SCRIPTS / "campaign.py"
+        fake_codex.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} learning-review {shlex.quote(str(self.root))} "
+            f"--file {shlex.quote(str(review))}\n"
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(cli))} handoff {shlex.quote(str(self.root))} "
+            "--state needs_agent --reason 'fresh failure review complete'\n"
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"failure-critic-thread\"}'\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        with mock.patch.object(controller.campaign, "live_preflight", return_value={}):
+            controller.run_failure_reviewer(self.root, str(fake_codex))
+        state = campaign.load_state(self.root)
+        attestation = state["learning"]["reviews"]["surprising-diagnostic"]
+        self.assertTrue(attestation["independent"])
+        self.assertEqual(attestation["reviewer_thread_id"], "failure-critic-thread")
+        self.assertEqual(attestation["author_thread_id"], "author-thread")
+        self.assertIsNone(state["learning"]["pending_failure_review"])
+        self.assertEqual(state["control"]["state"], "needs_agent")
+        review_entry = campaign.learning_failure_review_by_finding(
+            state, "surprising-diagnostic"
+        )
+        self.assertTrue(review_entry["independent"])
+
     def test_conditional_review_stays_in_novelty_review_for_bounded_probes(self) -> None:
         review = self.prepare_novelty_review(decision="conditional_probe")
         fake_codex = self.base / "fake-conditional-reviewer-codex"

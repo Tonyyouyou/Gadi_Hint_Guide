@@ -392,7 +392,71 @@ class CampaignTests(unittest.TestCase):
             "strongest_rejection": "Confidence-triggered recomputation may already implement the same mechanism.",
             "author_rebuttal": "The checked work uses confidence for stopping, not replay-boundary selection.",
         }
+        if CAMPAIGN.learning_enabled(state):
+            freeze = state["learning"]["claim_freeze"]
+            payload.update(
+                {
+                    "hypothesis_id": freeze["hypothesis_id"],
+                    "research_graph_sha256": freeze["graph_sha256"],
+                }
+            )
         return payload
+
+    def initialize_learning(self, *, adopt_current_claim: bool = False) -> None:
+        self.write_candidate_portfolio()
+        arguments = [
+            "learning-init",
+            str(self.root),
+            "--reason",
+            "unit-test hypothesis workflow",
+        ]
+        if adopt_current_claim:
+            arguments.append("--adopt-current-claim")
+        code, _, error = self.call(*arguments)
+        self.assertEqual(code, 0, error)
+        if not adopt_current_claim:
+            code, _, error = self.call(
+                "claim-freeze",
+                str(self.root),
+                "--hypothesis-id",
+                "adaptive-replay",
+                "--reason",
+                "unit-test claim freeze",
+            )
+            self.assertEqual(code, 0, error)
+
+    def write_interpretation(
+        self,
+        experiment_id: str,
+        *,
+        validity: str,
+        outcome: str,
+        next_action: str,
+        finding_id: str,
+    ) -> Path:
+        state = CAMPAIGN.load_state(self.root)
+        experiment = state["experiments"][experiment_id]
+        payload = {
+            "schema_version": 1,
+            "finding_id": finding_id,
+            "experiment_id": experiment_id,
+            "hypothesis_id": experiment["hypothesis_binding"]["hypothesis_id"],
+            "evidence_role": experiment["evidence_role"],
+            "validity": validity,
+            "outcome": outcome,
+            "expected": "The registered prediction should separate the mechanism from its baseline.",
+            "observed": "The bounded test produced the recorded terminal outcome.",
+            "surprise": "The result changes confidence in at least one causal assumption.",
+            "alternative_explanations": ["Measurement noise or an unmodeled workload interaction."],
+            "assumption_updates": [],
+            "information_gain": "high" if validity == "valid" else "none",
+            "proposed_delta": "Follow the declared next action without rewriting the observed evidence.",
+            "next_action": next_action,
+            "discriminating_test": "Repeat the smallest controlled comparison on an independent setting.",
+        }
+        path = self.base / f"{finding_id}.json"
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return path
 
     def write_novelty_audit(
         self,
@@ -1166,6 +1230,7 @@ class CampaignTests(unittest.TestCase):
             self.call("phase", str(self.root), "portfolio", "--reason", "route and observations fixed")[0],
             0,
         )
+        self.initialize_learning()
         idea = self.write_idea_report()
         audit = self.write_novelty_audit(idea)
         self.assertEqual(
@@ -1981,7 +2046,258 @@ class CampaignTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("missing artifacts", error)
 
+    def test_technical_failure_records_repair_without_scientific_review(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        code, _, error = self.add_sanity()
+        self.assertEqual(code, 0, error)
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["experiments"]["sanity-001"]["status"] = "failed"
+        interpretation = self.write_interpretation(
+            "sanity-001",
+            validity="technical_invalid",
+            outcome="not_scientific",
+            next_action="repair",
+            finding_id="technical-repair-one",
+        )
+        code, _, error = self.call(
+            "learning-record",
+            str(self.root),
+            "--file",
+            str(interpretation),
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertIsNone(state["learning"]["pending_failure_review"])
+        code, _, error = self.add_batch("sanity-repair", "sanity")
+        self.assertEqual(code, 0, error)
+
+    def test_new_portfolio_reseeds_graph_without_adding_persistent_files(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        state = CAMPAIGN.load_state(self.root)
+        portfolio_path = Path(state["artifacts"]["candidate_portfolio"]["path"])
+        replacement = {
+            "schema_version": CAMPAIGN.PORTFOLIO_SCHEMA_VERSION,
+            "mission_sha256": state["mission_sha256"],
+            "route_sha256": state["route"]["sha256"],
+            "created_at": CAMPAIGN.utc_now(),
+            "active_candidate_id": "replacement-one",
+            "candidates": [
+                {
+                    "id": f"replacement-{index}",
+                    "status": "active" if index == "one" else "backup",
+                    "observation": f"Replacement observation {index}.",
+                    "causal_hypothesis": f"Replacement cause {index}.",
+                    "mechanism": f"Replacement mechanism {index}.",
+                    "predicted_signature": f"Replacement prediction {index}.",
+                    "falsifier": f"Replacement falsifier {index}.",
+                    "cheap_test": f"Replacement cheap test {index}.",
+                    "nearest_work_delta": f"Replacement prior delta {index}.",
+                    "estimated_cost": {"su": 1, "jobs": 1, "persistent_entries": 2},
+                }
+                for index in ("one", "two", "three")
+            ],
+        }
+        portfolio_path.write_text(json.dumps(replacement, indent=2) + "\n", encoding="utf-8")
+        code, _, error = self.call(
+            "artifact",
+            str(self.root),
+            "--name",
+            "candidate_portfolio",
+            "--path",
+            str(portfolio_path),
+            "--assurance",
+            "provisional",
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertTrue(state["learning"]["portfolio_refresh_required"])
+        code, _, error = self.add_batch("blocked-before-reseed", "sanity")
+        self.assertNotEqual(code, 0)
+        self.assertIn("reseed", error)
+        code, _, error = self.call(
+            "learning-reseed",
+            str(self.root),
+            "--reason",
+            "all previous candidates were exhausted",
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        graph = CAMPAIGN.load_research_graph(state)
+        self.assertEqual(graph["active_hypothesis_ids"], ["replacement-one"])
+        self.assertIsNone(graph["claim_hypothesis_id"])
+        old = {item["id"]: item for item in graph["hypotheses"]}["adaptive-replay"]
+        self.assertEqual(old["status"], "eliminated")
+        self.assertFalse(state["learning"]["portfolio_refresh_required"])
+        self.assertTrue(
+            any(
+                entry.get("entry_type") == "portfolio_reseed"
+                for entry in CAMPAIGN.load_learning_ledger(state)
+            )
+        )
+        self.assertTrue((self.root / CAMPAIGN.LEARNING_GRAPH_NAME).is_file())
+        self.assertTrue((self.root / CAMPAIGN.LEARNING_LEDGER_NAME).is_file())
+
+    def test_valid_surprise_needs_fresh_review_before_hypothesis_branch(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        code, _, error = self.add_sanity()
+        self.assertEqual(code, 0, error)
+        self.complete_probe("sanity-001")
+        interpretation = self.write_interpretation(
+            "sanity-001",
+            validity="valid",
+            outcome="unexpected",
+            next_action="branch",
+            finding_id="unexpected-boundary-one",
+        )
+        code, _, error = self.call(
+            "learning-record",
+            str(self.root),
+            "--file",
+            str(interpretation),
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("premature-adaptation", "sanity")
+        self.assertNotEqual(code, 0)
+        self.assertIn("fresh failure review", error)
+
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["control"].update({"state": "agent_running", "thread_id": "author-learning-thread"})
+        code, _, error = self.call(
+            "handoff",
+            str(self.root),
+            "--state",
+            "needs_failure_review",
+            "--reason",
+            "unexpected valid result needs an independent critic",
+        )
+        self.assertEqual(code, 0, error)
+        review_path = self.base / "failure-review.json"
+        review_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "finding_id": "unexpected-boundary-one",
+                    "decision": "accept",
+                    "failure_class": "anomaly",
+                    "allowed_action": "branch",
+                    "material_change": True,
+                    "validity_assessment": "The compact output is a valid controlled observation.",
+                    "rationale": "A parallel mechanism is warranted, but the parent remains testable.",
+                    "required_test": "Test the child on a new workload before any confirmatory claim.",
+                    "alternative_explanations": ["A workload-specific interaction may explain the effect."],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["control"]["state"] = "failure_reviewer_running"
+        code, _, error = self.call(
+            "learning-review",
+            str(self.root),
+            "--file",
+            str(review_path),
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.call(
+            "handoff",
+            str(self.root),
+            "--state",
+            "needs_agent",
+            "--reason",
+            "provisional failure review recorded",
+        )
+        self.assertEqual(code, 0, error)
+
+        child_path = self.base / "child-hypothesis.json"
+        child_path.write_text(
+            json.dumps(
+                {
+                    "id": "adaptive-replay-boundary-branch",
+                    "candidate_id": "adaptive-replay",
+                    "origin_finding_ids": ["unexpected-boundary-one"],
+                    "observation": "The boundary anomaly persists under a valid controlled run.",
+                    "causal_hypothesis": "A workload-conditioned boundary regime causes the anomaly.",
+                    "mechanism": "Select between two boundary controllers using a predeclared regime test.",
+                    "predictions": ["The regime selector separates the observed latency modes."],
+                    "falsifiers": ["The modes disappear on an independent workload."],
+                    "assumptions": [
+                        {
+                            "id": "branch-regime",
+                            "text": "The observed modes reflect a stable workload regime.",
+                            "status": "untested",
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.call(
+            "hypothesis-fork",
+            str(self.root),
+            "--parent-id",
+            "adaptive-replay",
+            "--finding-id",
+            "unexpected-boundary-one",
+            "--kind",
+            "branch",
+            "--file",
+            str(child_path),
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("pending", error)
+
+        with CAMPAIGN.locked_state(self.root) as state:
+            entries = CAMPAIGN.load_learning_ledger(state)
+            for entry in entries:
+                if entry.get("entry_type") == "failure_review":
+                    entry.update({"independent": True, "reviewer_thread_id": "fresh-critic-thread"})
+            CAMPAIGN.rewrite_learning_ledger(state, entries)
+            state["learning"]["reviews"]["unexpected-boundary-one"].update(
+                {
+                    "independent": True,
+                    "decision": "accept",
+                    "allowed_action": "branch",
+                    "material_change": True,
+                    "reviewer_thread_id": "fresh-critic-thread",
+                }
+            )
+            state["learning"]["pending_failure_review"] = None
+        code, _, error = self.call(
+            "hypothesis-fork",
+            str(self.root),
+            "--parent-id",
+            "adaptive-replay",
+            "--finding-id",
+            "unexpected-boundary-one",
+            "--kind",
+            "branch",
+            "--file",
+            str(child_path),
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        graph = CAMPAIGN.load_research_graph(state)
+        self.assertEqual(
+            set(graph["active_hypothesis_ids"]),
+            {"adaptive-replay", "adaptive-replay-boundary-branch"},
+        )
+        self.assertIsNone(graph["claim_hypothesis_id"])
+        finding = CAMPAIGN.learning_interpretation_by_finding(state, "unexpected-boundary-one")
+        self.assertEqual(finding["hypothesis_id"], "adaptive-replay")
+        self.assertFalse(finding["confirmation_eligible"])
+
     def record_completion_artifacts(self) -> dict[str, Path]:
+        self.initialize_learning()
         idea, audit, review = self.record_method_clearance()
         state = CAMPAIGN.load_state(self.root)
         paths: dict[str, Path] = {

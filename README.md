@@ -5,7 +5,7 @@
 The maintained agent workflows are:
 
 - [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md): Gadi storage, environments, data, queues, interactive debugging, PBS validation, submission, monitoring, and troubleshooting.
-- [`skills/gadi-autoresearch`](skills/gadi-autoresearch/SKILL.md): a bounded, resumable broad-idea-to-paper research campaign using persistent control, interactive exploration, batch experiments, evidence audits, and compact inode-safe state.
+- [`skills/gadi-autoresearch`](skills/gadi-autoresearch/SKILL.md): a bounded, resumable broad-idea-to-paper campaign using versioned hypothesis evolution, independent failure and novelty review, persistent control, PBS experiments, and compact inode-safe state.
 
 For this account, it is installed as:
 
@@ -26,6 +26,7 @@ Invoke them as `$run-on-gadi` and `$gadi-autoresearch`. The non-negotiable stora
 - Re-run the live preflight for `wa66`, `ey69`, `po67`, and `iv96` before choosing a charging project; quarterly KSU and inode usage are dynamic.
 - For multi-hour exploration, put the campaign-specific tmux watchdog and lightweight controller in an NCI persistent session while all computation remains inside PBS.
 - Interactive exploration is capped at four hours. Production/autonomous submission requires explicit side-effect approval or a recorded, validated `gadi-autoresearch` campaign envelope.
+- Autoresearch keeps hypothesis evolution in only `RESEARCH_GRAPH.json` and `LEARNING_LEDGER.jsonl`; every terminal scientific experiment is interpreted, and material changes require a fresh critic before adaptation.
 
 The older manual notes below are retained as background. Hard-coded projects, mounts, resource values, and HOME-based environment steps in those notes must not override the skill or current NCI documentation.
 

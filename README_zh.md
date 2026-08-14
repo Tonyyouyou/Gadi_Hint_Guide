@@ -5,7 +5,7 @@
 现在维护两套供 agent 使用的工作流：
 
 - [`skills/run-on-gadi`](skills/run-on-gadi/SKILL.md)：负责 Gadi 存储、环境、数据、队列、交互调试、PBS 校验、提交、监控和排错。
-- [`skills/gadi-autoresearch`](skills/gadi-autoresearch/SKILL.md)：从宽泛 idea 到论文的有界、可恢复自动研究 campaign，支持 persistent control、交互探索、batch 实验、证据审计和文件数安全的紧凑状态。
+- [`skills/gadi-autoresearch`](skills/gadi-autoresearch/SKILL.md)：从宽泛 idea 到论文的有界、可恢复自动研究 campaign，支持版本化假设演化、独立失败/新颖性审查、persistent control、PBS 实验和文件数安全的紧凑状态。
 
 这个账号上已经安装为：
 
@@ -26,6 +26,7 @@
 - 每次在 `wa66`、`ey69`、`po67`、`iv96` 中选择计费项目之前都重新运行实时预检；季度 KSU 和 inode 使用量是动态的。
 - 三四小时的探索把 tmux 和轻量控制器放在 NCI persistent session，所有计算仍只在 PBS 节点中执行。
 - 交互探索最长四小时；正式/自动 batch 提交必须有单独授权，或由已记录且经过校验的 `gadi-autoresearch` campaign envelope 授权。
+- 自动研究只用 `RESEARCH_GRAPH.json` 和 `LEARNING_LEDGER.jsonl` 两个文件保存假设演化；每个结束的科研实验都必须解释，实质性改题必须先经过新的独立 critic。
 
 下方旧版手工说明仅作为背景保留，其中硬编码的项目、挂载、资源数值和在 HOME 创建环境的步骤不能覆盖 skill 或 NCI 当前官方文档。
 
