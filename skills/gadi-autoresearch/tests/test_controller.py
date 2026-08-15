@@ -835,6 +835,14 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("exactly one .tar.zst", prompt)
         self.assertIn("compute job's PBS jobfs", prompt)
 
+    def test_agent_prompt_requires_evidence_aware_gpu_routing(self) -> None:
+        prompt = controller.agent_prompt(self.root, campaign.load_state(self.root))
+        self.assertIn(str(controller.HARDWARE_REFERENCE), prompt)
+        self.assertIn("Portable BF16 diagnostics and pilots", prompt)
+        self.assertIn("Performance comparisons must be within one GPU family", prompt)
+        self.assertIn("Never race duplicate cells", prompt)
+        self.assertIn("cancel a running job merely for turnaround", prompt)
+
     def test_stale_agent_state_schedules_recovery(self) -> None:
         with campaign.locked_state(self.root) as state:
             state["control"].update({"state": "agent_running", "reason": "simulated controller loss"})

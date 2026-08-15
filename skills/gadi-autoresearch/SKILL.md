@@ -42,6 +42,8 @@ Use this existing modern Python only for the lightweight control CLI; do not ins
 
 Before initializing, read [references/campaign-contract.md](references/campaign-contract.md) and [references/adapter-system.md](references/adapter-system.md). Before each research phase, read the matching section of [references/research-workflow.md](references/research-workflow.md). Before proposing, selecting, or revising a candidate, read [references/novelty-audit.md](references/novelty-audit.md). For audio missions, load only the selected sections of [references/audio-research.md](references/audio-research.md).
 
+Before registering or rerouting any GPU experiment, read [references/hardware-routing.md](references/hardware-routing.md). Select the fastest compatible route to evidence, not the newest accelerator. Portable diagnostic and exploratory work should normally use V100 or A100; reserve H200 for measured memory need, Hopper-specific behavior, or matched final evidence. Record the compatibility set, evidence scope, rate-limited queue observation, selected queue, and one bounded fallback before submission. Never compare performance across GPU types or cancel a running job merely to improve queue turnaround.
+
 ## Freeze the Mission and Route
 
 Convert the user's natural language into `MISSION.json`; the user need not provide JSON. Freeze:
@@ -164,6 +166,7 @@ Every experiment must declare:
 - completed dependencies
 - evidence role: `exploratory`, `diagnostic`, `confirmatory`, or `replication`
 - exact hypothesis ID and research-graph revision
+- for GPU work, a recorded hardware decision and claim ceiling following `references/hardware-routing.md`
 
 `discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Before final clearance, candidate-independent input preparation is limited to six total environment/data/model attempts, 1,500 SU total, and 16 persistent entries, dynamically reduced by the campaign envelope. Each asset type permits at most three attempts. A failed attempt may use a new immutable experiment ID only after its PBS script changes; every failed attempt remains charged to the job, SU, and file budgets, and retry lineage is recorded. Input preparation requires `allow_storage_publish`; model acquisition additionally requires the separately recorded `allow_model_publish`. Use the audited jobfs helper, smoke-test the shell, Python/framework imports, and container execution, then publish only one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, packed data under `/g/data/wa66/Xiangyu/Data`, or one provenance-recorded public model archive under `/g/data/wa66/Xiangyu/Data/models`. A `conditional_probe` review opens only `novelty_probe`: at most three attempts, 1,000 SU total (dynamically reduced for smaller campaigns), one GPU and four hours per job, and 32 persistent entries. `baseline`, `audit`, and `paper` require final resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted directly or by attested arbitration; both registration and submission recheck every hash-bound gate.
 
