@@ -12,7 +12,7 @@ Treat persistent file count as a first-class resource alongside SU, bytes, memor
 State one mode before acting:
 
 - **Static inspection**: read, edit, lint, and test without PBS.
-- **Interactive debug**: preserve an explicitly approved `qsub -I` terminal in control-host `tmux`, preferably on an NCI persistent session for multi-hour agent exploration, then debug only after PBS allocates a compute/GPU node.
+- **Interactive debug**: preserve an explicitly approved `qsub -I` terminal in control-host `tmux`, preferably on an NCI persistent session for multi-hour agent exploration, then debug only after PBS allocates a compute/GPU node. A workload failure returns to this shell; reuse the allocation for the next repaired run instead of submitting another debug batch.
 - **Production batch**: submit a standalone PBS script only after a smoke test and a separate production submission approval.
 
 Words such as "debug", "test", "try", or "interactive" never authorise a production job. Words such as "prepare", "write", or "fix the PBS script" never authorise any `qsub`. An explicitly approved `gadi-autoresearch` campaign may authorise submissions only through its validating campaign CLI and only within the recorded envelope; it never authorises raw `qsub` or `qdel`. Read [references/debugging.md](references/debugging.md) for the mandatory tmux workflow and debug-to-production gate.

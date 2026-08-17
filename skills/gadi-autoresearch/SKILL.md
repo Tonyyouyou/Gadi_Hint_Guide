@@ -126,11 +126,13 @@ Omit any capability the user did not grant. Add `--allow-storage-publish` only w
 Classify every action before running it:
 
 - **Static work**: literature search, code editing, test design, linting, compact log analysis, result parsing, and paper writing. Keep login/persistent-session processes below NCI's shared-host limits.
-- **Interactive exploration**: expected runtime at most four hours **and** the agent needs frequent edit-run-inspect cycles. Hold `qsub -I` in a named tmux session on an NCI persistent session; use one GPU and the smallest useful sample first.
+- **Interactive debugging**: expected runtime at most four hours **and** the agent needs frequent edit-run-inspect cycles. Hold one `qsub -I` allocation in a named tmux session on an NCI persistent session; use one GPU and the smallest useful sample first. A failed workload returns to the same PBS shell: repair and rerun there instead of releasing the GPU and submitting another batch.
 - **Batch experiment**: command is reproducible and unattended, even if shorter than four hours; always use batch for longer work, full data, multi-GPU, or fixed training.
 - **Adaptive long campaign**: submit bounded batch workers, persist results, release compute, then wake Codex to decide the next experiment. Never hold a GPU while waiting for model reasoning.
 
 For a deterministic three-hour training run, prefer batch. For a ten-hour adaptive investigation, prefer several checkpointed jobs rather than one ten-hour agent-held allocation.
+
+Do not use a GPU batch queue as an edit-run loop. If a diagnostic GPU command is not yet proven end to end, start interactive immediately. After one interpreted `technical_invalid / repair` GPU batch in a cell, the next repair **must** be an interactive diagnostic on the intended successor queue, linked with `--debug-for FAILED_ID`. Reuse that allocation across clean source commits until the smallest real witness exits zero, publish its compact receipt, close it, record the interpretation, and only then return to batch at the receipt's exact source commit. A valid scientific gate, falsification, or qualification is not a technical failure and does not trigger this rule. Keep the allocation only while concrete edit-run-inspect work is active; release it for literature work, data acquisition, long redesign, or external waits.
 
 ## Execute the Research Lifecycle
 
@@ -167,6 +169,8 @@ Every experiment must declare:
 - evidence role: `exploratory`, `diagnostic`, `confirmatory`, or `replication`
 - exact hypothesis ID and research-graph revision
 - for GPU work, a recorded hardware decision and claim ceiling following `references/hardware-routing.md`
+
+An interactive repair additionally declares `debug_for`, naming the terminal GPU batch whose recorded interpretation is `technical_invalid / repair`. The CLI rejects another GPU batch repair while that latest technical failure lacks a completed successor-queue interactive receipt at the exact source commit.
 
 `discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Before final clearance, candidate-independent input preparation is limited to six total environment/data/model attempts, 1,500 SU total, and 16 persistent entries, dynamically reduced by the campaign envelope. Each asset type permits at most three attempts. A failed attempt may use a new immutable experiment ID only after its PBS script changes; every failed attempt remains charged to the job, SU, and file budgets, and retry lineage is recorded. Input preparation requires `allow_storage_publish`; model acquisition additionally requires the separately recorded `allow_model_publish`. Use the audited jobfs helper, smoke-test the shell, Python/framework imports, and container execution, then publish only one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, packed data under `/g/data/wa66/Xiangyu/Data`, or one provenance-recorded public model archive under `/g/data/wa66/Xiangyu/Data/models`. A `conditional_probe` review opens only `novelty_probe`: at most three attempts, 1,000 SU total (dynamically reduced for smaller campaigns), one GPU and four hours per job, and 32 persistent entries. `baseline`, `audit`, and `paper` require final resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted directly or by attested arbitration; both registration and submission recheck every hash-bound gate.
 

@@ -1817,6 +1817,99 @@ def interpretation_entries(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def experiment_hypothesis_id(experiment: dict[str, Any]) -> str | None:
+    binding = experiment.get("hypothesis_binding")
+    return binding.get("hypothesis_id") if isinstance(binding, dict) else None
+
+
+def latest_repairable_gpu_batch(
+    state: dict[str, Any],
+    experiment: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    if (
+        experiment.get("mode") != "batch"
+        or int(experiment.get("resources", {}).get("ngpus", 0)) <= 0
+        or not learning_enabled(state)
+    ):
+        return None
+    target_hypothesis = experiment_hypothesis_id(experiment)
+    interpreted = interpretation_entries(state)
+    candidates: list[tuple[dt.datetime, str, dict[str, Any]]] = []
+    for experiment_id, prior in state["experiments"].items():
+        if (
+            prior.get("mode") != "batch"
+            or int(prior.get("resources", {}).get("ngpus", 0)) <= 0
+            or prior.get("stage") != experiment.get("stage")
+            or experiment_hypothesis_id(prior) != target_hypothesis
+        ):
+            continue
+        interpretation = interpreted.get(experiment_id)
+        if not interpretation:
+            continue
+        candidates.append(
+            (parse_time(interpretation["recorded_at"]), experiment_id, interpretation)
+        )
+    if not candidates:
+        return None
+    _, experiment_id, interpretation = max(candidates, key=lambda item: item[0])
+    if (
+        interpretation.get("validity") == "technical_invalid"
+        and interpretation.get("next_action") == "repair"
+    ):
+        return experiment_id, interpretation
+    return None
+
+
+def matching_interactive_debug_receipt(
+    state: dict[str, Any],
+    experiment: dict[str, Any],
+    failed_experiment_id: str,
+) -> str | None:
+    target_hypothesis = experiment_hypothesis_id(experiment)
+    target_queue = experiment["resources"]["queue"]
+    target_commit = experiment["source_commit"]
+    for debug_id, debug in state["experiments"].items():
+        if (
+            debug.get("mode") != "interactive"
+            or debug.get("debug_for") != failed_experiment_id
+            or experiment_status(debug) != "completed"
+            or debug.get("evidence_role") != "diagnostic"
+            or experiment_hypothesis_id(debug) != target_hypothesis
+            or debug.get("resources", {}).get("queue") != target_queue
+            or debug.get("source_commit") != target_commit
+        ):
+            continue
+        attempts = debug.get("attempts") or []
+        if not attempts:
+            continue
+        attempt = attempts[-1]
+        if (
+            attempt.get("status") == "completed"
+            and attempt.get("published_at")
+            and attempt.get("last_command_exit") == 0
+            and attempt.get("runs")
+        ):
+            return debug_id
+    return None
+
+
+def require_gpu_debug_receipt(state: dict[str, Any], experiment: dict[str, Any]) -> None:
+    repair = latest_repairable_gpu_batch(state, experiment)
+    if not repair:
+        return
+    failed_experiment_id, _ = repair
+    receipt = matching_interactive_debug_receipt(state, experiment, failed_experiment_id)
+    if receipt:
+        return
+    raise CampaignError(
+        f"GPU batch repair after technical failure {failed_experiment_id} requires a completed "
+        "same-queue interactive debug receipt at the exact source commit; register one with "
+        f"--mode interactive --evidence-role diagnostic --debug-for {failed_experiment_id}, "
+        "reuse its allocation until the command succeeds, publish and close it, record its "
+        "interpretation, then preview this batch again"
+    )
+
+
 def pending_interpretation_ids(state: dict[str, Any]) -> list[str]:
     if not learning_enabled(state):
         return []
@@ -3810,6 +3903,31 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         validate_resources(resources, state["approval"], args.mode)
         if args.mode == "interactive":
             validate_interactive_profile(resources)
+        if args.debug_for and args.mode != "interactive":
+            raise CampaignError("--debug-for is valid only for interactive experiments")
+        if args.debug_for:
+            prior = state["experiments"].get(args.debug_for)
+            if not prior:
+                raise CampaignError(f"unknown --debug-for experiment: {args.debug_for}")
+            interpretation = interpretation_entries(state).get(args.debug_for)
+            if (
+                prior.get("mode") != "batch"
+                or int(prior.get("resources", {}).get("ngpus", 0)) <= 0
+                or experiment_status(prior) not in JOB_TERMINAL
+                or not interpretation
+                or interpretation.get("validity") != "technical_invalid"
+                or interpretation.get("next_action") != "repair"
+            ):
+                raise CampaignError(
+                    "--debug-for must name a terminal GPU batch with a recorded "
+                    "technical_invalid/repair interpretation"
+                )
+            if evidence_role != "diagnostic":
+                raise CampaignError("an interactive GPU repair receipt must use evidence-role diagnostic")
+            if experiment_hypothesis_id(prior) != (
+                hypothesis_binding.get("hypothesis_id") if hypothesis_binding else None
+            ):
+                raise CampaignError("interactive GPU repair must retain the failed batch hypothesis")
         result_dir = canonical(state["root"]) / "runs" / args.id
         if result_dir.exists():
             raise CampaignError(f"experiment result path already exists: {result_dir}")
@@ -3834,6 +3952,7 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             "result_dir": str(result_dir),
             "success_file": str(success_path),
             "depends_on": args.depends_on,
+            "debug_for": args.debug_for,
             "claim_binding": claim_binding,
             "evidence_role": evidence_role,
             "hypothesis_binding": hypothesis_binding,
@@ -3945,6 +4064,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         raise CampaignError(f"unknown experiment: {args.id}")
     if experiment["mode"] != "batch":
         raise CampaignError("use the interactive command for interactive experiments")
+    require_learning_cycle_clear(state)
     require_experiment_novelty(state, experiment["stage"])
     require_experiment_claim_binding(state, experiment)
     if experiment["stage"] == NOVELTY_PROBE_STAGE:
@@ -3954,6 +4074,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
     require_dependencies(state, experiment)
     require_registered_inputs(state, experiment)
     validate_resources(experiment["resources"], state["approval"], "batch")
+    require_gpu_debug_receipt(state, experiment)
     ensure_submission_budget(state, experiment)
     preflight = live_preflight(state, experiment["resources"]["project"])
     project_report = preflight["projects"][0]
@@ -3992,6 +4113,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         require_current_skill(current)
         pin_missing_skill_reference(current)
         require_author_control(current, "submit experiments")
+        require_learning_cycle_clear(current)
         current_exp = current["experiments"][args.id]
         current_status = experiment_status(current_exp)
         if current_status not in {"planned", "failed", "failed_submission", "cancelled"}:
@@ -4003,6 +4125,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         require_dependencies(current, current_exp)
         require_registered_inputs(current, current_exp)
         validate_resources(current_exp["resources"], current["approval"], "batch")
+        require_gpu_debug_receipt(current, current_exp)
         ensure_submission_budget(current, current_exp)
         current_exp["attempts"].append(attempt)
         current_exp["status"] = "submitting"
@@ -4413,6 +4536,17 @@ def interactive_jobfs(experiment: dict[str, Any]) -> tuple[Path, Path]:
     return jobfs, staging
 
 
+def reset_interactive_staging(jobfs: Path, staging_dir: Path) -> None:
+    resolved = canonical(staging_dir)
+    if resolved == jobfs or not is_within(resolved, jobfs):
+        raise CampaignError("interactive staging directory resolves outside PBS_JOBFS")
+    if staging_dir.is_symlink():
+        raise CampaignError("interactive staging directory cannot be a symlink")
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+
 def cmd_interactive_run(args: argparse.Namespace) -> None:
     initial = load_state(args.root)
     workspace = canonical(initial["workspace"], strict=True)
@@ -4427,6 +4561,8 @@ def cmd_interactive_run(args: argparse.Namespace) -> None:
             raise CampaignError("latest interactive attempt is not active")
         if attempt.get("published_at"):
             raise CampaignError("interactive results are already published; exit PBS and close the attempt")
+        if attempt.get("last_command_exit") == 0:
+            raise CampaignError("latest interactive run succeeded; publish it before another run")
         jobfs, staging_dir = interactive_jobfs(experiment)
         require_registered_inputs(state, experiment)
         if source["commit"] != experiment["source_commit"]:
@@ -4441,7 +4577,7 @@ def cmd_interactive_run(args: argparse.Namespace) -> None:
         snapshot_state = state
         snapshot_experiment = experiment
     staged_workspace = stage_source_commit(snapshot_state, snapshot_experiment, jobfs)
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    reset_interactive_staging(jobfs, staging_dir)
     command = substitute_command(
         snapshot_experiment,
         snapshot_state,
@@ -4460,11 +4596,13 @@ def cmd_interactive_run(args: argparse.Namespace) -> None:
         if experiment["source_commit"] != snapshot_experiment["source_commit"]:
             raise CampaignError("interactive source commit changed concurrently")
         image = canonical(experiment["image"], strict=True)
+        run_started_at = utc_now()
         attempt.update({
             "status": "interactive_running",
             "job_id": os.environ["PBS_JOBID"],
             "started_at": attempt.get("started_at") or utc_now(),
             "staging_dir": str(staging_dir),
+            "last_command_started_at": run_started_at,
         })
         experiment["status"] = "interactive_running"
         add_history(
@@ -4480,32 +4618,68 @@ def cmd_interactive_run(args: argparse.Namespace) -> None:
         invocation.append("--nv")
     invocation.extend([str(image), *command])
     completed = subprocess.run(invocation, check=False)
+    effective_returncode = completed.returncode
+    validation_error = None
     try:
         produced = validate_output_tree(staging_dir, expected_files)
     except OutputLimitError as exc:
-        with locked_state(args.root) as state:
-            state["status"] = "paused"
-            state["control"].update({"state": "paused", "reason": str(exc)})
-            add_history(state, "interactive_output_limit_exceeded", experiment_id=args.id)
-        raise CampaignError(f"interactive output limit exceeded; exit the allocation: {exc}") from exc
+        produced = expected_files + 1
+        validation_error = str(exc)
+        effective_returncode = completed.returncode or 87
+    except CampaignError as exc:
+        produced = None
+        validation_error = str(exc)
+        effective_returncode = completed.returncode or 86
+    if effective_returncode == 0:
+        result_dir = canonical(snapshot_experiment["result_dir"])
+        success = canonical(snapshot_experiment["success_file"])
+        try:
+            success_relative = success.relative_to(result_dir)
+        except ValueError as exc:
+            raise CampaignError("interactive success marker is outside its result directory") from exc
+        staged_success = staging_dir / success_relative
+        if not staged_success.is_file() or staged_success.is_symlink():
+            validation_error = f"interactive success marker is missing or invalid: {staged_success}"
+            effective_returncode = 86
     with locked_state(args.root) as state:
         attempt = state["experiments"][args.id]["attempts"][-1]
-        attempt.update({"last_command_exit": completed.returncode, "staged_entries": produced})
+        run = {
+            "number": len(attempt.get("runs", [])) + 1,
+            "source_commit": state["experiments"][args.id]["source_commit"],
+            "started_at": run_started_at,
+            "finished_at": utc_now(),
+            "command_exit": completed.returncode,
+            "effective_exit": effective_returncode,
+            "staged_entries": produced,
+            "validation_error": validation_error,
+        }
+        attempt.setdefault("runs", []).append(run)
+        del attempt["runs"][:-50]
+        attempt.update({
+            "last_command_exit": effective_returncode,
+            "last_command_raw_exit": completed.returncode,
+            "last_validation_error": validation_error,
+            "staged_entries": produced,
+        })
         add_history(
             state,
             "interactive_workload_finished",
             experiment_id=args.id,
-            returncode=completed.returncode,
+            returncode=effective_returncode,
+            raw_returncode=completed.returncode,
             staged_entries=produced,
+            validation_error=validation_error,
         )
     print(json.dumps({
-        "returncode": completed.returncode,
+        "returncode": effective_returncode,
+        "raw_returncode": completed.returncode,
+        "validation_error": validation_error,
         "staging_dir": str(staging_dir),
         "staged_entries": produced,
         "published": False,
     }, indent=2))
-    if completed.returncode:
-        raise SystemExit(completed.returncode)
+    if effective_returncode:
+        raise SystemExit(effective_returncode)
 
 
 def cmd_interactive_publish(args: argparse.Namespace) -> None:
@@ -5477,6 +5651,10 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--expected-files", type=int, required=True)
     experiment.add_argument("--success-file", required=True)
     experiment.add_argument("--depends-on", action="append", default=[])
+    experiment.add_argument(
+        "--debug-for",
+        help="failed GPU batch repaired by this reusable interactive diagnostic",
+    )
     experiment.add_argument(
         "--evidence-role",
         choices=tuple(sorted(research_learning.EVIDENCE_ROLES)),

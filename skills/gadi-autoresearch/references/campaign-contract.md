@@ -284,6 +284,15 @@ Preview includes maximum SU, live project availability, inode/file budget, linte
 Interactive experiments use the same registration with `--mode interactive`, a walltime no greater than `04:00:00`, and a named tmux session:
 
 ```bash
+"$PYTHON" "$CAMPAIGN" experiment-add "$ROOT" \
+  --id debug-001 --stage sanity --mode interactive \
+  --evidence-role diagnostic --hypothesis-id CANDIDATE_ID \
+  --debug-for sanity-001 \
+  --queue dgxa100 --project ey69 --walltime 04:00:00 \
+  --ncpus 16 --ngpus 1 --mem-gb 128 --jobfs-gb 200 \
+  --expected-files 4 --success-file metrics.json \
+  --command-json '["/env/bin/python","{WORKSPACE}/smoke.py","--output","{RESULT_DIR}/metrics.json"]'
+
 "$PYTHON" "$CAMPAIGN" interactive "$ROOT" --id debug-001
 "$PYTHON" "$CAMPAIGN" interactive "$ROOT" --id debug-001 --session aris-campaign-debug --execute
 ```
@@ -299,7 +308,9 @@ exit
   --id debug-001 --outcome completed --actual-walltime 02:17:00
 ```
 
-`interactive-run` executes the registered argument vector through the frozen image and writes only below `$PBS_JOBFS/gadi-autoresearch-output/ID`. It may be rerun while debugging. `interactive-publish` is allowed only after the latest run exits zero; it enforces the declared entry limit and atomically publishes compact output. Do not mark the attempt terminal until the interactive shell has exited. A failed or cancelled allocation may be closed without publication.
+`interactive-run` executes the registered argument vector through the frozen image and writes only below `$PBS_JOBFS/gadi-autoresearch-output/ID`. It may be rerun while debugging. Each rerun records the current clean Git commit and replaces only the preceding failed staging directory inside jobfs; a command failure does not close the PBS shell or release the GPU. A successful run cannot be overwritten: publish it or close the allocation deliberately. `interactive-publish` is allowed only after the latest run exits zero and the success marker exists; it enforces the declared entry limit and atomically publishes compact output. Do not mark the attempt terminal until the interactive shell has exited. A failed or cancelled allocation may be closed without publication.
+
+`--debug-for` is required when repairing the latest interpreted `technical_invalid / repair` GPU batch in the same cell. The receipt must use the successor batch's GPU queue and the same hypothesis, publish successfully, close as completed, and end on the exact source commit used by that batch. It may use a different queue from the failed batch only when the recorded hardware route justifies the change. `submit` rejects the successor otherwise. This gate does not apply to a valid scientific falsification, qualification, or predeclared safety gate.
 
 `interactive-close --actual-walltime` records a useful manual estimate, but it is not scheduler evidence. The campaign therefore keeps the full requested SU reserved for that attempt. Only `resources_used.walltime` obtained by the rate-limited PBS refresh can reduce committed SU below the job's maximum charge.
 

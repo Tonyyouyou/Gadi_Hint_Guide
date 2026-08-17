@@ -62,6 +62,21 @@ Portable BF16 diagnostic and exploratory work that fits A100 should default to `
 has materially lower pressure than `gpuhopper`. CPU-only reasoning, preparation, and parsing stay
 off GPU queues.
 
+## Reuse Debug Allocations
+
+A GPU batch is not a debugging terminal. If the model, container, CUDA path, kernel, staging, or
+real-stack interface still needs edit-run-inspect cycles, use one single-GPU interactive allocation
+for at most four hours. After the first interpreted technical failure from a GPU batch, a batch
+repair is blocked until an interactive diagnostic linked with `--debug-for` completes on the
+successor batch's GPU queue at the exact successor source commit. That queue may differ from the
+failed batch only when the normal compatibility and escalation rules justify it.
+
+Keep the PBS shell alive after a nonzero workload exit. Commit each control-side repair, rerun
+`interactive-run` in the same allocation, and let it replace only its previous jobfs staging. Do
+not close the allocation until the smallest representative real witness succeeds or no concrete
+next run can be prepared without a long or external wait. A scientific gate or negative result is
+terminal evidence, not a technical excuse to keep tuning inside the allocation.
+
 ## Bounded Queue Rerouting
 
 Declare the fallback before submitting. A reasonable default for a portable diagnostic or pilot

@@ -77,7 +77,7 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 | `needs_novelty_review` | start one fresh, non-resumed adversarial reviewer thread |
 | `needs_novelty_arbitration` | start one fresh, non-resumed arbiter thread distinct from author and reviewer |
 | `needs_failure_review` | start one fresh, non-resumed critic for a terminal-experiment interpretation |
-| `waiting_pbs` | refresh tracked batch jobs at the permitted cadence, or wake the agent to inspect a recorded interactive tmux pane |
+| `waiting_pbs` | refresh tracked batch jobs at the permitted cadence, or wake the agent to inspect a recorded interactive tmux pane; a failed workload stays in that pane for another `interactive-run` rather than ending the allocation |
 | `waiting_time` | sleep until recorded UTC time |
 | `waiting_human` | remain idle until genuine external evidence or authorization is recorded |
 | `paused` | supervisor remains idle and preserves the hard safety reason |

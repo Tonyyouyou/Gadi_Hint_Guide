@@ -843,6 +843,13 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Never race duplicate cells", prompt)
         self.assertIn("cancel a running job merely for turnaround", prompt)
 
+    def test_agent_prompt_requires_reusable_interactive_gpu_debugging(self) -> None:
+        prompt = controller.agent_prompt(self.root, campaign.load_state(self.root))
+        self.assertIn("one technical GPU batch failure", prompt)
+        self.assertIn("--debug-for", prompt)
+        self.assertIn("Do not exit the PBS shell", prompt)
+        self.assertIn("same allocation", prompt)
+
     def test_stale_agent_state_schedules_recovery(self) -> None:
         with campaign.locked_state(self.root) as state:
             state["control"].update({"state": "agent_running", "reason": "simulated controller loss"})

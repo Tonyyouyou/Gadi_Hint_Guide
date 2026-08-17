@@ -234,12 +234,18 @@ class CampaignTests(unittest.TestCase):
     def add_sanity(self, *, expected_files: int = 8) -> tuple[int, str, str]:
         return self.add_batch("sanity-001", "sanity", expected_files=expected_files)
 
-    def add_interactive(self, *, ncpus: int = 12) -> tuple[int, str, str]:
-        return self.call(
+    def add_interactive(
+        self,
+        *,
+        ncpus: int = 12,
+        experiment_id: str = "debug-001",
+        debug_for: str | None = None,
+    ) -> tuple[int, str, str]:
+        arguments = [
             "experiment-add",
             str(self.root),
             "--id",
-            "debug-001",
+            experiment_id,
             "--stage",
             "sanity",
             "--mode",
@@ -264,7 +270,10 @@ class CampaignTests(unittest.TestCase):
             "metrics.json",
             "--command-json",
             '["/env/bin/python","{WORKSPACE}/train.py","--output","{RESULT_DIR}/metrics.json"]',
-        )
+        ]
+        if debug_for:
+            arguments.extend(["--debug-for", debug_for])
+        return self.call(*arguments)
 
     def record_artifact(self, name: str, path: Path, assurance: str) -> None:
         code, _, error = self.call(
@@ -1710,6 +1719,73 @@ class CampaignTests(unittest.TestCase):
             "interactive-ok\n",
         )
 
+    def test_interactive_reuses_allocation_after_failed_command(self) -> None:
+        self.init()
+        self.approve()
+        self.assertEqual(self.add_interactive()[0], 0)
+        with CAMPAIGN.locked_state(self.root) as state:
+            experiment = state["experiments"]["debug-001"]
+            experiment["attempts"].append(
+                {
+                    "number": 1,
+                    "status": "interactive_pending",
+                    "job_id": None,
+                    "tmux_session": "debug-test",
+                    "submitted_at": CAMPAIGN.utc_now(),
+                    "finished_at": None,
+                    "exit_status": None,
+                    "max_su": experiment["max_su"],
+                    "actual_su": None,
+                }
+            )
+            experiment["status"] = "interactive_pending"
+        jobfs = self.base / "interactive-reuse-jobfs"
+        jobfs.mkdir()
+        old_job = os.environ.get("PBS_JOBID")
+        old_jobfs = os.environ.get("PBS_JOBFS")
+        os.environ.update({"PBS_JOBID": "54322.gadi-pbs", "PBS_JOBFS": str(jobfs)})
+        calls = 0
+        real_run = subprocess.run
+
+        def iterative_runner(invocation: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            if not invocation or invocation[0] != "bash":
+                return real_run(invocation, **_)
+            calls += 1
+            output = Path(invocation[-1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            stale = output.parent / "failed-partial.txt"
+            if calls == 1:
+                stale.write_text("partial\n", encoding="utf-8")
+                return subprocess.CompletedProcess(invocation, 69)
+            self.assertFalse(stale.exists())
+            output.write_text("interactive-ok\n", encoding="utf-8")
+            return subprocess.CompletedProcess(invocation, 0)
+
+        try:
+            with mock.patch.object(CAMPAIGN.subprocess, "run", side_effect=iterative_runner):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as first:
+                    CAMPAIGN.cmd_interactive_run(
+                        argparse_namespace(root=str(self.root), id="debug-001")
+                    )
+                self.assertEqual(first.exception.code, 69)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    CAMPAIGN.cmd_interactive_run(
+                        argparse_namespace(root=str(self.root), id="debug-001")
+                    )
+        finally:
+            if old_job is None:
+                os.environ.pop("PBS_JOBID", None)
+            else:
+                os.environ["PBS_JOBID"] = old_job
+            if old_jobfs is None:
+                os.environ.pop("PBS_JOBFS", None)
+            else:
+                os.environ["PBS_JOBFS"] = old_jobfs
+        attempt = CAMPAIGN.load_state(self.root)["experiments"]["debug-001"]["attempts"][-1]
+        self.assertEqual([run["effective_exit"] for run in attempt["runs"]], [69, 0])
+        self.assertEqual(attempt["last_command_exit"], 0)
+
     def test_external_environment_job_is_previewed_and_tracked(self) -> None:
         self.init()
         self.approve(allow_storage=True)
@@ -2071,6 +2147,74 @@ class CampaignTests(unittest.TestCase):
         state = CAMPAIGN.load_state(self.root)
         self.assertIsNone(state["learning"]["pending_failure_review"])
         code, _, error = self.add_batch("sanity-repair", "sanity")
+        self.assertEqual(code, 0, error)
+
+    def test_gpu_batch_repair_requires_matching_interactive_receipt(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        code, _, error = self.add_sanity()
+        self.assertEqual(code, 0, error)
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["experiments"]["sanity-001"]["status"] = "failed"
+        interpretation = self.write_interpretation(
+            "sanity-001",
+            validity="technical_invalid",
+            outcome="not_scientific",
+            next_action="repair",
+            finding_id="gpu-technical-repair",
+        )
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(interpretation)
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("sanity-repair", "sanity")
+        self.assertEqual(code, 0, error)
+        code, _, error = self.call("submit", str(self.root), "--id", "sanity-repair")
+        self.assertNotEqual(code, 0)
+        self.assertIn("interactive debug receipt", error)
+
+        code, _, error = self.add_interactive(debug_for="sanity-001")
+        self.assertEqual(code, 0, error)
+        debug_result = self.root / "runs" / "debug-001"
+        debug_result.mkdir(parents=True)
+        (debug_result / "metrics.json").write_text("{}\n", encoding="utf-8")
+        with CAMPAIGN.locked_state(self.root) as state:
+            experiment = state["experiments"]["debug-001"]
+            experiment["status"] = "completed"
+            experiment["attempts"] = [
+                {
+                    "number": 1,
+                    "status": "completed",
+                    "job_id": "54323.gadi-pbs",
+                    "submitted_at": CAMPAIGN.utc_now(),
+                    "finished_at": CAMPAIGN.utc_now(),
+                    "exit_status": 0,
+                    "max_su": experiment["max_su"],
+                    "actual_su": 1.0,
+                    "actual_su_source": "reported",
+                    "published_at": CAMPAIGN.utc_now(),
+                    "last_command_exit": 0,
+                    "runs": [{"number": 1, "effective_exit": 0}],
+                }
+            ]
+        debug_interpretation = self.write_interpretation(
+            "debug-001",
+            validity="valid",
+            outcome="inconclusive",
+            next_action="continue",
+            finding_id="gpu-debug-receipt",
+        )
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(debug_interpretation)
+        )
+        self.assertEqual(code, 0, error)
+        with mock.patch.object(
+            CAMPAIGN,
+            "lint_script",
+            return_value={"errors": [], "warnings": [], "summary": {}},
+        ):
+            code, _, error = self.call("submit", str(self.root), "--id", "sanity-repair")
         self.assertEqual(code, 0, error)
 
     def test_new_portfolio_reseeds_graph_without_adding_persistent_files(self) -> None:

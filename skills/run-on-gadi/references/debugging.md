@@ -104,6 +104,14 @@ Use a tiny representative sample, one process, and one GPU first. Keep temporary
 
 Edit small source files from a separate login-node tmux window or the normal Codex workspace, then rerun them on the allocated node. Never perform computation in that login-node window.
 
+Do not type `exit` merely because Python, CUDA, or a smoke test returns nonzero. The interactive
+PBS shell remains the allocation boundary: inspect the failure, make and commit the next small
+repair from the control-side workspace, restage that commit, and rerun inside the same allocation.
+For `gadi-autoresearch`, use `interactive-run`; it clears only the previous failed output staging
+under `$PBS_JOBFS`, preserves a bounded run history, and refuses to overwrite a successful staged
+result. Exit promptly after success, or when the next useful run requires data acquisition, long
+redesign, human input, or another external wait.
+
 ## Finish and Promote
 
 Exit the container, then exit the PBS interactive shell promptly to release charged resources. A finished tmux pane may remain for diagnostics because the helper enables `remain-on-exit`; capture needed text and remove only that known session.
