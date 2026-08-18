@@ -19,11 +19,13 @@ Use `$run-on-gadi` as the infrastructure authority. This skill owns the research
 6. Never compute on a login node or persistent-session host. Those hosts may edit, search, reason, compile small files, submit PBS, and monitor at most once per ten minutes.
 7. Never invoke raw `qsub` or `qdel` in an autonomous campaign. Use this skill's campaign CLI. A campaign approval is bounded permission, not unlimited cluster access.
 8. Never use `--dangerously-bypass-approvals-and-sandbox`, an infinite `--full-auto` loop, or a scheduler as a scientific reviewer.
-9. Never treat a coined name, cross-domain transfer, component bundle, or positive pilot as method novelty. A hard novelty rejection requires a checked functionally equivalent prior; individually known primitives or a hypothetical A+B composition are insufficient. Empirical uncertainty goes through a bounded `novelty_probe`, author rebuttal, and fresh third-thread arbitration. Planning and method experiments still require final hash-bound clearance. Same-family review remains scientifically `provisional`.
+9. Never treat a coined name, cross-domain transfer, component bundle, or positive pilot as method novelty. A hard novelty rejection requires a checked functionally equivalent prior; individually known primitives or a hypothetical A+B composition are insufficient. Use a preliminary nearest-prior check for scout/pilot triage, then exhaustive hash-bound novelty review only after a branch has a core signal and reaches claim maturity. Same-family review remains scientifically `provisional`.
 10. Never silently downgrade the mission. A diagnostic, reproduction, or new application may inform discovery, but it can become the final paper only when `MISSION.json` explicitly permits that contribution.
 11. Never invent human judgments. When perceptual or preference evidence is required, publish one packed blinded study bundle, hand off to `waiting_human`, and continue only from real recorded evidence.
-12. Never assume the first plausible idea must work unchanged. Keep a bounded hypothesis graph, interpret every terminal scientific experiment, and distinguish implementation failure from assumption, mechanism, scope, ceiling, anomaly, and inconclusive outcomes.
-13. Never let the author alone turn a surprising or negative result into a new claim. Valid falsification, qualification, surprise, or a proposed refine/branch/pivot/stop requires a fresh failure critic. Evidence that generates a child hypothesis remains evidence about its parent and cannot also confirm the child.
+12. Never assume the first plausible idea must work unchanged. Keep a bounded hypothesis graph, interpret every terminal scientific experiment, and distinguish implementation failure from assumption, mechanism, scope, ceiling, anomaly, and inconclusive outcomes. Require blind raw-result analysis only for completed evidence-bearing scientific batches; failed, cancelled, diagnostic, and interactive attempts stay in the infrastructure lane without spending another agent turn.
+13. Never let a critic own the project. A fresh critic reviews material scientific mutation, classifies objection severity, and requests at most one decision-changing test; the Research Director records the bounded portfolio decision. Nonmaterial qualification and protocol revision do not summon a mechanism critic. Evidence that generates a child remains evidence about its parent and cannot confirm the child.
+14. Keep scientific hypotheses, data/evaluation protocols, and infrastructure attempts in separate state lanes. A technical failure cannot mutate a hypothesis; a protocol revision cannot confirm one.
+15. Run research as `seed -> scout -> pilot -> claim -> paper`, with park/kill/refine/branch/pivot exits. Early work optimizes time-to-signal and time-to-kill; submission-grade rigor applies only after promotion.
 
 ## Locate the Tools
 
@@ -40,7 +42,7 @@ PYTHON=/home/561/xz4320/miniconda3/bin/python3
 
 Use this existing modern Python only for the lightweight control CLI; do not install packages into it. Scientific dependencies remain in immutable `.sqsh` images.
 
-Before initializing, read [references/campaign-contract.md](references/campaign-contract.md) and [references/adapter-system.md](references/adapter-system.md). Before each research phase, read the matching section of [references/research-workflow.md](references/research-workflow.md). Before proposing, selecting, or revising a candidate, read [references/novelty-audit.md](references/novelty-audit.md). For audio missions, load only the selected sections of [references/audio-research.md](references/audio-research.md).
+Before initializing, read [references/campaign-contract.md](references/campaign-contract.md), [references/lab-operating-model.md](references/lab-operating-model.md), and [references/adapter-system.md](references/adapter-system.md). Before each maturity transition, read the matching section of [references/research-workflow.md](references/research-workflow.md). Before preliminary or exhaustive novelty work, read [references/novelty-audit.md](references/novelty-audit.md). For audio missions, load only the selected sections of [references/audio-research.md](references/audio-research.md).
 
 Before registering or rerouting any GPU experiment, read [references/hardware-routing.md](references/hardware-routing.md). Select the fastest compatible route to evidence, not the newest accelerator. Portable diagnostic and exploratory work should normally use V100 or A100; reserve H200 for measured memory need, Hopper-specific behavior, or matched final evidence. Record the compatibility set, evidence scope, rate-limited queue observation, selected queue, and one bounded fallback before submission. Never compare performance across GPU types or cancel a running job merely to improve queue turnaround.
 
@@ -106,6 +108,7 @@ Example draft:
   --mission-file /absolute/path/MISSION.json \
   --workspace /g/data/wa66/Xiangyu/Result_EXISTING/PROJECT/source-repo \
   --projects wa66,ey69 \
+  --research-mode balanced \
   --max-su 500 --max-jobs 12 --max-concurrent 1 --max-gpus 1 \
   --max-files 512 --max-agent-turns 40 \
   --deadline 2026-09-01T00:00:00Z
@@ -132,7 +135,7 @@ Classify every action before running it:
 
 For a deterministic three-hour training run, prefer batch. For a ten-hour adaptive investigation, prefer several checkpointed jobs rather than one ten-hour agent-held allocation.
 
-Do not use a GPU batch queue as an edit-run loop. If a diagnostic GPU command is not yet proven end to end, start interactive immediately. After one interpreted `technical_invalid / repair` GPU batch in a cell, the next repair **must** be an interactive diagnostic on the intended successor queue, linked with `--debug-for FAILED_ID`. Reuse that allocation across clean source commits until the smallest real witness exits zero, publish its compact receipt, close it, record the interpretation, and only then return to batch at the receipt's exact source commit. A valid scientific gate, falsification, or qualification is not a technical failure and does not trigger this rule. Keep the allocation only while concrete edit-run-inspect work is active; release it for literature work, data acquisition, long redesign, or external waits.
+Do not use a CPU or GPU batch queue as an edit-run loop. If a parser, model, or CUDA path is not proven end to end, start interactive. After one interpreted `technical_invalid / repair` batch in a cell, the next repair **must** be a same-queue interactive diagnostic linked with `--debug-for FAILED_ID` and the same `--cell-id`. Reuse that allocation across clean source commits until the smallest real witness exits zero, publish its compact receipt, close it, record the interpretation, and only then return to batch at the receipt's exact source commit. Keep the allocation only for active edit-run-inspect work; release it for literature, acquisition, redesign, or external waits.
 
 ## Execute the Research Lifecycle
 
@@ -140,16 +143,12 @@ Use this ordered lifecycle; a pivot may return to an earlier phase only with a r
 
 1. `territory`: read the mission; map current primary literature, open code/data/models, research cells, and hard constraints in `RESEARCH_BRIEF.md` and `LITERATURE.md`. Do not choose an active idea yet.
 2. `discovery`: resolve at most a few promising adapter routes; use literature, formal tensions, and bounded `discovery`/`profile` probes to produce `DISCOVERY_REPORT.md` with reproducible observations and opportunity hypotheses.
-3. `portfolio`: write `CANDIDATE_PORTFOLIO.json`. Keep at least 3 viable candidates for broad exploration, 2 for directed exploration, or 1 for a fixed problem. Each needs a causal hypothesis, mechanism, predicted signature, falsifier, cheap distinguishing test, prior-work delta, and cost. Run `learning-init`, then use the compact `RESEARCH_GRAPH.json` and `LEARNING_LEDGER.jsonl` for hypothesis versions and experiment learning.
-4. `novelty_review`: freeze one active hypothesis, write the bound `IDEA_REPORT.md` and `NOVELTY_AUDIT.json`, then hand off to `needs_novelty_review`. Only the controller's fresh reviewer writes `NOVELTY_REVIEW.json`. `clear_to_plan` opens planning; `exact_prior_reject` returns to portfolio/discovery; `conditional_probe` opens only a bounded distinguishing probe followed by `NOVELTY_REBUTTAL.json` and a fresh third-thread `NOVELTY_ARBITRATION.json`. Incompatible fallback claims cannot enter planning.
-5. `planning`: freeze datasets/splits/metrics/baselines/seeds, adapter-specific evidence, claim ceilings, human-study requirements, and stop/pivot rules.
-6. `implementation`: reuse credible bases, expose parameters, and keep source commits and compact outputs reproducible.
-7. `sanity`: run the smallest real witness for ground truth, imports, kernels, output marker, memory, jobfs, and file count.
-8. `experiments`: run matched baselines, main evidence, replication, ablations, negative controls, robustness, and adapter-specific audits.
-9. `review`: use fresh integrity review over exact code/config/raw paths; same-family semantic review remains provisional.
-10. `synthesis`: map every claim to machine-readable evidence; report uncertainty, failed branches, and limitations.
-11. `paper`: write English LaTeX, compile cleanly, and retain only final sources, figures, bibliography, and PDF.
-12. `audit`: refresh novelty, verify mission compatibility, numerical claims, human-evidence provenance, citations, artifact freshness, and compilation.
+3. `portfolio`: write `CANDIDATE_PORTFOLIO.json`. Keep at least 3 viable candidates for broad exploration, 2 for directed exploration, or 1 for a fixed problem. Run `learning-init`; use the compact graph, ledger, and `research_os` packet. Request blind opportunity scouts when entering a materially new territory.
+4. `scout`: perform a preliminary nearest-prior check and `concept-freeze`, then run the cheapest integrated real-model mechanism witness. Clean or narrow data is allowed only with an explicit exploratory claim ceiling. Kill or refine quickly when the differentiating prediction fails.
+5. `pilot`: record a Director promotion and pilot-authorized protocol, then test the actual target path against a competitive naive baseline with one decisive ablation. Keep at most three active branches.
+6. `claim`: after a valid core signal, record a Director promotion, freeze the protocol, use `claim-freeze` to bind the scientific object, then run the exhaustive novelty audit/review against that binding. Only after clearance run confirmatory baselines, main experiments, statistics, robustness, and claim-relevant integrity audits.
+7. `paper`: independently reproduce the central result, build a machine-readable claim graph, synthesize limitations, write English LaTeX, and compile the PDF.
+8. `audit`: refresh novelty, verify mission compatibility, numerical claims, protocol bindings, human-evidence provenance, citations, artifact freshness, and compilation.
 
 The detailed artifact and decision contract is in [references/research-workflow.md](references/research-workflow.md). The adaptation from the local ARIS checkout is documented in [references/aris-adaptation.md](references/aris-adaptation.md).
 
@@ -168,11 +167,15 @@ Every experiment must declare:
 - completed dependencies
 - evidence role: `exploratory`, `diagnostic`, `confirmatory`, or `replication`
 - exact hypothesis ID and research-graph revision
-- for GPU work, a recorded hardware decision and claim ceiling following `references/hardware-routing.md`
+- stable scientific cell ID and technical-attempt lineage
+- decision question and the action under supporting versus falsifying outcomes
+- seed/scout/pilot/claim/paper maturity and protocol revision
+- whether it is a direct core-mechanism test
+- compatible queues, selected queue, one bounded fallback, and resource rationale
 
-An interactive repair additionally declares `debug_for`, naming the terminal GPU batch whose recorded interpretation is `technical_invalid / repair`. The CLI rejects another GPU batch repair while that latest technical failure lacks a completed successor-queue interactive receipt at the exact source commit.
+An interactive repair additionally declares `debug_for`, naming the terminal CPU or GPU batch whose recorded interpretation is `technical_invalid / repair`. The CLI rejects another same-cell batch repair while that latest technical failure lacks a completed same-queue interactive receipt at the exact source commit.
 
-`discovery`, `sanity`, and `profile` may be registered before novelty clearance with compatible frozen inputs. They gather observations or verify feasibility and cannot support the final novelty claim by themselves. Before final clearance, candidate-independent input preparation is limited to six total environment/data/model attempts, 1,500 SU total, and 16 persistent entries, dynamically reduced by the campaign envelope. Each asset type permits at most three attempts. A failed attempt may use a new immutable experiment ID only after its PBS script changes; every failed attempt remains charged to the job, SU, and file budgets, and retry lineage is recorded. Input preparation requires `allow_storage_publish`; model acquisition additionally requires the separately recorded `allow_model_publish`. Use the audited jobfs helper, smoke-test the shell, Python/framework imports, and container execution, then publish only one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, packed data under `/g/data/wa66/Xiangyu/Data`, or one provenance-recorded public model archive under `/g/data/wa66/Xiangyu/Data/models`. A `conditional_probe` review opens only `novelty_probe`: at most three attempts, 1,000 SU total (dynamically reduced for smaller campaigns), one GPU and four hours per job, and 32 persistent entries. `baseline`, `audit`, and `paper` require final resolution. `pilot`, `main`, and `ablation` require a cold-reviewed primary contribution accepted directly or by attested arbitration; both registration and submission recheck every hash-bound gate.
+`discovery`, `sanity`, and `profile` may run before concept selection. `scout` requires a concept freeze; `pilot` requires preliminary novelty clearance and Director promotion. `baseline`, `main`, `ablation`, `audit`, and paper-facing work require claim freeze and exhaustive novelty resolution. Candidate-independent input preparation remains bounded by the campaign envelope. Publish only one immutable `.sqsh` under `/g/data/wa66/Xiangyu/enviroment_cache`, packed data under `/g/data/wa66/Xiangyu/Data`, or one approved model archive under `/g/data/wa66/Xiangyu/Data/models`; expand and cache them only in jobfs.
 
 Use `{RESULT_DIR}`, `{PBS_JOBFS}`, `{WORKSPACE}`, and `{DATA_ROOT}` placeholders in command arguments. The worker substitutes them without shell evaluation. `{RESULT_DIR}` is attempt-local jobfs staging during execution, not a direct gdata write path; compact output is validated and atomically published only after success.
 
@@ -200,9 +203,9 @@ configuration, pass the same explicit settings to preview and start:
 
 ```bash
 bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN \
-  --model gpt-5.6-sol --reasoning-effort ultra
+  --model gpt-5.6-sol --reasoning-effort max
 bash "$STARTER" --root /absolute/campaign-root --session aris-CAMPAIGN \
-  --model gpt-5.6-sol --reasoning-effort ultra --start
+  --model gpt-5.6-sol --reasoning-effort max --start
 ```
 
 The controller applies these settings to the resumable author and every fresh novelty reviewer,
@@ -216,9 +219,13 @@ The first command previews. The second is permitted only after the campaign gran
 - enforces a single writer
 - polls PBS no more often than 600 seconds
 - invokes or resumes one `codex exec` turn only when action is needed
+- launches three blind opportunity-scout roles in fresh contexts and returns their attested compact reports to the Director
+- launches a fresh raw-result analyst for every completed evidence-bearing scientific batch before author interpretation
 - launches `needs_novelty_review` in a new non-resumed adversarial thread and attests that its thread ID differs from the author thread
 - preserves `conditional_probe` in `novelty_review`, enforces its job/SU/GPU/time/file caps, and launches `needs_novelty_arbitration` in a third non-resumed thread distinct from author and reviewer
-- launches `needs_failure_review` in a fresh non-resumed critic thread, validates its result and interpretation binding, and permits hypothesis mutation only after controller attestation
+- launches `needs_failure_review` only for material scientific change, validates its binding, caps a review chain at two, and requires a Director decision before mutation
+- reports time-to-signal, technical-invalid rate, review pressure, protocol growth, and inode-growth circuit breakers without pausing ordinary scientific uncertainty
+- repacks excessive loose Git objects at a clean idle point and preserves a single canonical writer
 - atomically promotes the next ranked backup after rejection, or returns to `discovery` when the portfolio is exhausted, without silently changing the paper type
 - retries Codex exits, missing handoffs, stale leases, transient preflight failures, and PBS refresh failures with bounded backoff; a repeatedly broken author thread is rotated from durable campaign state
 - stores one bounded rotating log under the campaign root
@@ -227,7 +234,7 @@ The first command previews. The second is permitted only after the campaign gran
 
 Read [references/persistent-control.md](references/persistent-control.md) before starting it. Do not parse `persistent-sessions list` output in automation.
 
-Each campaign pins the skill repository commit and skill-tree hash. A changed installed skill pauses the campaign instead of silently changing its rules. After reviewing an update and confirming no jobs are active, pause the campaign and run `campaign.py skill-adopt --by USER --reason REASON`, then resume explicitly.
+Each campaign pins the skill repository commit and skill-tree hash. A changed installed skill pauses the campaign instead of silently changing its rules. After reviewing an update and confirming no jobs are active, pause the campaign and run `campaign.py skill-adopt --by USER --reason REASON`, then resume explicitly. Add `--rotate-author` for a major operating-model migration so preserved evidence is read by a fresh Director context.
 
 ## Stop, Pause, and Handoff
 
@@ -241,10 +248,10 @@ Before every Codex turn exits, write exactly one control handoff:
   --reason "jobs 123 and 124 must finish before analysis"
 ```
 
-Use `needs_novelty_review` only after the author records the audit and enters that phase. Use `needs_novelty_arbitration` only after a conditional review, completed bound probes, and a registered `NOVELTY_REBUTTAL.json`; the author must never write the arbitration. Use `needs_failure_review` after `learning-record` identifies valid falsification, qualification, surprise, or a proposed hypothesis mutation; the author must not write its own failure review. The CLI permits `waiting_human` only when the immutable mission uses `fallback_policy=wait_human`, or its resolved route requires external human evaluation under `pause_when_required`. Otherwise eliminate or revise the blocked candidate, promote a backup, return to discovery, or use `paused` for a hard authorization/integrity boundary. Use `waiting_time` with `--wake-at` for scheduled work or automatic recovery, and `complete` only after the completion audit passes.
+Use `needs_opportunity_scouts` for blind discovery in a materially new territory. New terminal experiments automatically use `needs_evidence_analysis`. Use `needs_failure_review` only when `learning-record` marks a material scientific falsification or mutation; protocol and infrastructure lanes do not use it. After the critic, record a Director decision. Use `needs_novelty_review` and `needs_novelty_arbitration` only at claim promotion with their bound artifacts. The CLI permits `waiting_human` only when the immutable mission or a required human-evidence route demands it. Ordinary uncertainty, failed experiments, queue delay, or reviewer disagreement remain autonomous.
 
 ## Completion Standard
 
-The goal is not complete because training ended or a PDF exists. Before `handoff --state complete`, inspect every required artifact and read [references/paper-completion.md](references/paper-completion.md). The CLI requires the mission, research brief, discovery report, candidate portfolio, research graph, learning ledger, idea report, novelty audit/review, research contract, experiment plan/ledger, results, experiment and claim audits, narrative report, paper source/PDF, citation audit, and final report. Every terminal scientific experiment must be interpreted, every required failure review independently attested, and the final claim frozen on the current graph. A conditional path additionally requires the bound rebuttal and attested arbitration. A route that requires human judgments also requires accepted `human_evaluation` evidence. Novelty artifacts must remain hash-bound and no more than 30 days old.
+The goal is not complete because training ended or a PDF exists. Before `handoff --state complete`, inspect every required artifact and read [references/paper-completion.md](references/paper-completion.md). The CLI requires the mission, research brief, discovery report, candidate portfolio, research graph, learning ledger, idea report, novelty audit/review, research contract, experiment plan/ledger, results, experiment audit, claim graph, claim audit, narrative report, paper source/PDF, citation audit, and final report. Every completed evidence-bearing scientific batch needs an attested blind analysis; every terminal experiment needs one author interpretation; every material critic needs a Director decision; the central result needs independent reproduction. Novelty artifacts remain hash-bound and no more than 30 days old.
 
 If only same-family semantic review was available, complete the campaign with `overall_assurance: provisional` and never call the paper submission-ready. Negative or inconclusive research may still produce an honest paper, but the title, abstract, claims, and limitations must match the evidence.

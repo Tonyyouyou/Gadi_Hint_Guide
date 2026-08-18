@@ -64,12 +64,12 @@ off GPU queues.
 
 ## Reuse Debug Allocations
 
-A GPU batch is not a debugging terminal. If the model, container, CUDA path, kernel, staging, or
-real-stack interface still needs edit-run-inspect cycles, use one single-GPU interactive allocation
-for at most four hours. After the first interpreted technical failure from a GPU batch, a batch
-repair is blocked until an interactive diagnostic linked with `--debug-for` completes on the
-successor batch's GPU queue at the exact successor source commit. That queue may differ from the
-failed batch only when the normal compatibility and escalation rules justify it.
+A CPU or GPU batch is not a debugging terminal. If the parser, model, container, CUDA path, kernel,
+staging, or real-stack interface needs edit-run-inspect cycles, use one interactive allocation for
+at most four hours. After the first interpreted technical failure from a batch, another same-cell
+batch repair is blocked until an interactive diagnostic linked with `--debug-for` completes on the
+successor batch's queue at the exact successor source commit. Use `normal` for CPU/parser repairs
+and a single GPU for GPU repairs.
 
 Keep the PBS shell alive after a nonzero workload exit. Commit each control-side repair, rerun
 `interactive-run` in the same allocation, and let it replace only its previous jobfs staging. Do

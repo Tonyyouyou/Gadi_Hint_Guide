@@ -122,170 +122,133 @@ to formal novelty audit.
 
 ## Hypothesis Evolution and Failure Learning
 
-The portfolio is a search frontier, not a promise that its first active mechanism will succeed.
-After registering it, initialize exactly two additional persistent files:
+The portfolio is a search frontier. Read `lab-operating-model.md`, register it, and initialize the
+bounded graph and ledger:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" learning-init "$ROOT" \
-  --reason "start bounded hypothesis evolution from the reviewed portfolio"
+  --reason "start bounded portfolio research"
 ```
 
-- `RESEARCH_GRAPH.json` stores at most 64 hypothesis versions and at most three active branches.
-- `LEARNING_LEDGER.jsonl` stores at most 400 compact interpretation and failure-review records.
+`RESEARCH_GRAPH.json` stores at most 64 versions and three active branches.
+`LEARNING_LEDGER.jsonl` stores at most 400 compact analyses, interpretations, protocol events,
+critic records, and Director decisions. The additional operating state lives inside
+`campaign.json`; do not create one file per thought, repair, or review.
 
-Do not create one note, trace, or review file per result. Temporary JSON used by a CLI command
-belongs in jobfs or `/tmp` and is removed after registration. Existing campaigns may migrate while
-paused with `learning-init --adopt-current-claim`; this preserves old novelty artifacts and records
-old terminal experiments as non-confirmatory legacy provenance rather than inventing retrospective
-interpretations.
+### Concept before claim
 
-The seeded graph converts each portfolio candidate into a version-1 hypothesis. Every hypothesis
-records its observation, causal statement, functional mechanism, predictions, falsifiers,
-assumptions, parent, relation (`seed`, `refinement`, or `branch`), and generating finding IDs.
-Freeze one active version before writing a new idea report or novelty audit:
+Perform a preliminary nearest-prior check, write its temporary schema from
+`lab-operating-model.md`, and freeze only the scoped concept:
 
 ```bash
-"$PYTHON" "$CAMPAIGN" claim-freeze "$ROOT" \
-  --hypothesis-id candidate-a \
-  --reason "candidate-a is the predeclared paper-facing claim"
+"$PYTHON" "$CAMPAIGN" concept-freeze "$ROOT" \
+  --hypothesis-id candidate-a --file /tmp/preliminary-novelty.json \
+  --reason "candidate-a is worth one real-path scout"
 ```
 
-A material mechanism change clears the old freeze and invalidates claim-facing novelty, plan,
-result, and paper bindings. It does not delete experiments, logs, Git history, the graph, or the
-learning ledger. The new version must be frozen and pass novelty review again.
+This authorizes exploratory `scout` and then promoted `pilot` work. It does not freeze a paper
+claim. A material mechanism change clears concept and claim bindings but preserves all evidence.
 
-Register each scientific experiment against one hypothesis and one evidence role:
+### Scientific cells
 
-- `exploratory`: selects, generates, or changes hypotheses; never confirms a later child.
-- `diagnostic`: checks implementation, measurement, bottleneck, or causal localization.
-- `confirmatory`: tests a frozen claim with a predeclared protocol after novelty clearance.
-- `replication`: repeats confirmatory evidence on an independent seed, dataset, model, or system.
-
-The stage supplies a conservative default, but the author should pass both values explicitly when
-the role matters:
+Register one decision question with a stable cell ID. Technical repairs reuse the cell:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" experiment-add "$ROOT" \
-  --id boundary-probe-001 --stage profile --mode batch \
+  --id boundary-scout-a1 --cell-id boundary-real-path \
+  --stage scout --maturity scout --mode batch \
   --evidence-role exploratory --hypothesis-id candidate-a \
+  --decision-question "Does the intervention reduce real target work?" \
+  --decision-if-supports "Promote to a competitive pilot." \
+  --decision-if-falsifies "Kill or refine the mechanism." \
+  --core-mechanism-test --protocol-revision 1 \
+  --compatible-queue dgxa100 --compatible-queue gpuvolta \
+  --queue dgxa100 --fallback-queue gpuvolta \
+  --resource-rationale "Portable one-GPU BF16 scout fitting A100 memory." \
   ...
 ```
 
-After PBS or an interactive attempt becomes terminal, no new adaptive scientific experiment may be
-registered until the author records exactly one interpretation. The input schema is:
+Evidence roles remain `exploratory`, `diagnostic`, `confirmatory`, and `replication`. Scout and
+pilot evidence can discover or promote a mechanism but cannot be relabeled as confirmation.
+
+### Blind analysis then author interpretation
+
+Every completed evidence-bearing scientific batch automatically enters `needs_evidence_analysis`. A fresh
+controller-launched analyst records raw-result validity and causal assessment without seeing the
+author's narrative. Only after controller attestation may the Director record schema version 2:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "finding_id": "boundary-regime-001",
-  "experiment_id": "boundary-probe-001",
+  "experiment_id": "boundary-scout-a1",
   "hypothesis_id": "candidate-a",
   "evidence_role": "exploratory",
   "validity": "valid",
   "outcome": "unexpected",
+  "lane": "scientific",
+  "materiality": "branch_material",
+  "decision_scope": "branch",
   "expected": "One latency regime under the predeclared load range.",
-  "observed": "Two reproducible regimes separated by encoder occupancy.",
-  "surprise": "The transition aligns with encoder occupancy rather than output length.",
-  "alternative_explanations": ["Measurement mode switching", "Allocator threshold"],
-  "assumption_updates": [
-    {
-      "assumption_id": "candidate-a-core",
-      "status": "qualified",
-      "evidence": "The mechanism holds only below the measured occupancy boundary."
-    }
-  ],
+  "observed": "Two regimes separated by encoder occupancy.",
+  "surprise": "The boundary follows occupancy rather than output length.",
+  "alternative_explanations": ["Allocator threshold"],
+  "assumption_updates": [],
   "information_gain": "high",
-  "proposed_delta": "Branch a workload-conditioned mechanism while retaining the parent.",
+  "proposed_delta": "Test one workload-conditioned child.",
   "next_action": "branch",
-  "discriminating_test": "Predeclare the boundary and repeat on an independent model."
+  "discriminating_test": "Repeat the boundary on one independent model."
 }
 ```
 
-Allowed validity values are `valid`, `technical_invalid`, and `contaminated`. Outcomes are
-`supports`, `falsifies`, `qualifies`, `unexpected`, `inconclusive`, and `not_scientific`.
-Actions are `continue`, `repair`, `refine`, `branch`, `pivot`, `stop`, and `confirm`.
+Use `lane=infrastructure` for technical invalidity and `repair`; use `lane=protocol` for
+`protocol_refine` or `narrow_scope`; use `lane=scientific` for causal evidence. Protocol and
+infrastructure lanes cannot mutate hypotheses. A nonmaterial qualification plus `continue` does
+not request a critic.
 
-```bash
-"$PYTHON" "$CAMPAIGN" learning-record "$ROOT" --file /tmp/interpretation.json
-```
+### Material critic and Director
 
-Apply these transitions:
-
-| Result | Required treatment |
-|---|---|
-| implementation/output/evaluator invalid | `technical_invalid` or `contaminated`, `not_scientific`, then `repair`; scientific belief is unchanged |
-| valid support during exploration | `supports`, then continue or freeze and seek new confirmatory evidence |
-| valid support during confirmation | eligible for the frozen claim, subject to audit and replication |
-| valid falsification, qualification, or surprise | preserve the result and request a fresh failure review |
-| valid result proposing refine/branch/pivot/stop | request a fresh failure review even when the primary metric improved |
-| inconclusive valid result | improve the discriminating test or stop for low information value; do not call it support |
-
-For a required review, the author hands off rather than adapting immediately:
-
-```bash
-"$PYTHON" "$CAMPAIGN" handoff "$ROOT" \
-  --state needs_failure_review \
-  --reason "finding boundary-regime-001 may require a material branch"
-```
-
-The controller launches a fresh non-resumed critic. The critic first inspects the registered
-hypothesis, command, source commit, raw compact result, and attempt metadata without reading the
-author's interpretation. It then reads the interpretation and records this exact schema:
+Material scientific falsification or mutation hands off to `needs_failure_review`. The fresh
+critic first reads raw evidence and then records schema version 2 with:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "finding_id": "boundary-regime-001",
   "decision": "accept",
+  "review_kind": "mechanism",
   "failure_class": "scope",
+  "objection_severity": "claim_scope",
   "allowed_action": "branch",
   "material_change": true,
-  "validity_assessment": "The controlled result is valid and reproducible.",
-  "rationale": "The parent remains plausible in one regime; a parallel branch is justified.",
-  "required_test": "Test the child on an independent model before claim freeze.",
-  "alternative_explanations": ["A hidden allocator threshold could still explain the split."]
+  "validity_assessment": "The controlled observation is valid.",
+  "rationale": "The parent remains plausible in one regime.",
+  "affected_claim": "Unconditional effect across occupancy regimes.",
+  "decision_changed": "Branch only if one independent test repeats the boundary.",
+  "required_test": "Run the same boundary test on one independent model.",
+  "estimated_cost": {"jobs": 1, "hours": 2, "su": 80, "persistent_entries": 4},
+  "alternative_explanations": ["A hidden allocator threshold could explain the split."]
 }
 ```
 
-Review decisions are `accept`, `revise`, or `reject`. Failure classes are `implementation`,
-`assumption`, `mechanism`, `scope`, `ceiling`, `anomaly`, and `inconclusive`. The controller rejects
-the author's thread, changed inputs, a dirty or changed source workspace, stale provisional review,
-or missing handoff. Only its attestation clears the review gate.
+The critic may request one bounded test. After the attestation, the author must use
+`director-decision` to continue, promote, park, kill, refine, branch, pivot, narrow, or stop with a
+new jobs/SU/turn/protocol budget. Two critic turns cap one chain; later decisions are the Director's
+responsibility.
 
-An authorized refinement supersedes its parent. An authorized branch keeps both parent and child
-active. The child JSON contains `id`, the same `candidate_id`, `origin_finding_ids`, observation,
-causal hypothesis, mechanism, predictions, falsifiers, and assumptions. It must cite the reviewed
-finding:
-
-```bash
-"$PYTHON" "$CAMPAIGN" hypothesis-fork "$ROOT" \
-  --parent-id candidate-a --finding-id boundary-regime-001 \
-  --kind branch --file /tmp/child-hypothesis.json
-```
-
-The generating experiment remains bound to `candidate-a`; it is never rewritten as evidence for
-the child and has `confirmation_eligible=false`. Test the child with a new experiment. Keep no more
-than three active branches, and eliminate or supersede them from evidence. Use `candidate-pivot`
-only for an independently justified move to a different portfolio candidate.
-
-If every portfolio candidate is exhausted, return to discovery and record a replacement portfolio.
-That change sets `portfolio_refresh_required` and blocks experiments. Preserve old eliminated
-hypotheses and ledger entries while reseeding the same two files:
-
-```bash
-"$PYTHON" "$CAMPAIGN" learning-reseed "$ROOT" \
-  --reason "old portfolio exhausted; seed the new evidence-led candidates"
-```
-
-Then freeze and novelty-review a new active version. A route change after hypothesis initialization
-uses the same refresh/reseed gate; old hypotheses retain their origin route as history.
+Only a Director-authorized refinement or branch may call `hypothesis-fork`. The generating result
+remains evidence about its parent and has `confirmation_eligible=false` for the child. Preserve at
+most three active branches. When the portfolio is exhausted, update it and use `learning-reseed`;
+old evidence remains immutable provenance.
 
 ## Novelty Review and Fallback
 
-Read `novelty-audit.md`. Freeze the selected hypothesis, write `IDEA_REPORT.md`, then create
-schema-version-2 `NOVELTY_AUDIT.json` bound to mission, route, portfolio, idea,
-`hypothesis_id`, and `research_graph_sha256`. Enter
-`novelty_review` and hand off to `needs_novelty_review`.
+Preliminary novelty belongs before scout/pilot and is recorded inside the concept freeze. It is a
+triage search, not a reviewer verdict. After a valid core signal and Director promotion to claim,
+record a frozen confirmatory protocol, use `claim-freeze`, read `novelty-audit.md`, write
+`IDEA_REPORT.md`, then create schema-version-2 `NOVELTY_AUDIT.json` bound to mission, route,
+portfolio, idea, `hypothesis_id`, and `research_graph_sha256`. Enter `novelty_review` and hand off
+to `needs_novelty_review`.
 
 The controller starts a fresh non-resumed reviewer. It independently searches the mechanism,
 classifies the actual contribution, and writes `NOVELTY_REVIEW.json`. The author never writes the
@@ -300,8 +263,8 @@ For `conditional_probe`, stay in `novelty_review`. Run only the machine-capped `
 stage, answer the declared question against the naive combination, and bind completed success
 markers into `NOVELTY_REBUTTAL.json`. Hand off to `needs_novelty_arbitration`; a fresh third thread
 distinct from both author and reviewer writes `NOVELTY_ARBITRATION.json`. It either clears the
-narrow primary claim or rejects it with functionally equivalent exact-prior evidence. No ordinary
-pilot/main/ablation or full implementation starts while this dispute remains open.
+narrow primary claim or rejects it with functionally equivalent exact-prior evidence. No
+confirmatory baseline/main/ablation or paper-facing implementation starts while this dispute is open.
 
 Planning is allowed only when the reviewed or arbitrated claim class is in the mission's
 `acceptable_contributions`. If the reviewer/arbiter hard-rejects, or a legacy verdict requests
@@ -341,9 +304,9 @@ Reuse a credible base repository where possible. Pin its exact commit. Expose al
 hyperparameters and output paths. Seed stochastic components and save resolved configuration with
 compact machine-readable metrics.
 
-Before substantial GPU use, give a fresh reviewer the contract, plan, code paths/diff, configuration,
-evaluator, and selected adapter requirements. Fix blocking implementation or evaluation defects and
-rerun the smallest deterministic test.
+Before confirmatory GPU use, give a fresh integrity critic the frozen contract, protocol, plan,
+code paths/diff, configuration, evaluator, and selected adapter requirements. Scout and pilot work
+instead use the automatic blind result analyst and stage-appropriate claim ceilings.
 
 Evaluation compares predictions with real ground truth or an explicitly labelled proxy. Keep
 holdout data inaccessible to selection code where practical. For generated media, fixed prompts,

@@ -37,7 +37,8 @@ Before final completion:
 6. **Compilation check**: clean LaTeX build succeeds, references resolve, figures exist, and the final PDF is nonempty/readable.
 7. **Human-evidence check**: every perceptual or preference claim has accepted real evidence when the route requires it; no ratings or participant records were invented.
 8. **Limitations check**: negative results, failed settings, compute limits, proxy evaluation, population limits, and unresolved risks appear in the paper.
-9. **Learning-lineage check**: every terminal scientific experiment has one interpretation, every required failure review is independently attested, the final claim is frozen on the current hypothesis version, and no generating evidence is reused as confirmation for its child.
+9. **Learning-lineage check**: every completed evidence-bearing scientific batch has an attested blind analysis, every terminal experiment has one author interpretation, every material critic has a Director decision, the final claim is frozen on the current hypothesis and protocol versions, and no generating evidence is reused as confirmation for its child.
+10. **Independent reproduction**: a fresh implementation or isolated rerun reproduces the central result after claim and protocol freeze.
 
 Semantic audits performed only by fresh Codex reviewers remain `provisional`. Deterministic compilation, schema, metric-trace, and file checks may be recorded as `deterministic`. Do not upgrade provisional science to submission-ready wording.
 
@@ -61,6 +62,7 @@ Record these canonical names with `campaign.py artifact`:
 | `experiment_ledger` | `EXPERIMENT_LEDGER.jsonl` |
 | `results` | `RESULTS.md` |
 | `experiment_audit` | `EXPERIMENT_AUDIT.md` or JSON |
+| `claim_graph` | `CLAIM_GRAPH.json` |
 | `claim_audit` | `CLAIM_AUDIT.md` or JSON |
 | `narrative_report` | `NARRATIVE_REPORT.md` |
 | `paper_source` | `paper/main.tex` |

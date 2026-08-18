@@ -87,14 +87,15 @@ and pause or hand off to the user (an unapproved draft is already eligible):
 
 ```bash
 "$PYTHON" "$CAMPAIGN" skill-adopt "$ROOT" \
-  --by USER --reason "reviewed installed skill revision and migration"
+  --by USER --reason "reviewed installed skill revision and migration" \
+  --rotate-author
 "$PYTHON" "$CAMPAIGN" resume "$ROOT" --reason "new skill revision adopted"
 ```
 
-Forward phase changes advance exactly one phase. Backward pivots are allowed with a reason. The
-phase order begins `territory -> discovery -> portfolio -> novelty_review -> planning`. Planning
-and later phases require mission/route/portfolio-bound novelty artifacts. The author requests the
-controller-only reviewer with:
+Forward phase changes advance exactly one phase and serialize durable artifacts; branch maturity
+is separately recorded as `seed -> scout -> pilot -> claim -> paper`. Backward pivots are allowed
+with a reason. `novelty_review -> planning` is entered only after a branch reaches claim maturity.
+The author requests the controller-only reviewer with:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state needs_novelty_review \
@@ -113,14 +114,15 @@ mission-incompatible candidate returns to `portfolio` when a backup exists, othe
 
 ## Hypothesis and Learning State
 
-After recording `CANDIDATE_PORTFOLIO.json`, initialize the bounded research graph before entering
-`novelty_review`:
+After recording `CANDIDATE_PORTFOLIO.json`, initialize the bounded graph and perform a preliminary
+nearest-prior concept freeze before scout work:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" learning-init "$ROOT" \
   --reason "seed versioned hypotheses from the candidate portfolio"
-"$PYTHON" "$CAMPAIGN" claim-freeze "$ROOT" \
-  --hypothesis-id CANDIDATE_ID --reason "predeclare the paper-facing mechanism"
+"$PYTHON" "$CAMPAIGN" concept-freeze "$ROOT" \
+  --hypothesis-id CANDIDATE_ID --file /tmp/preliminary-novelty.json \
+  --reason "authorize one bounded real-path scout"
 ```
 
 This creates only `RESEARCH_GRAPH.json` and `LEARNING_LEDGER.jsonl`. Both are atomically updated
@@ -128,10 +130,10 @@ and registered as deterministic artifacts. A paused legacy campaign with already
 may instead use `learning-init --adopt-current-claim`; it records old terminal jobs as legacy,
 non-confirmatory provenance and does not rewrite their meaning.
 
-Every terminal non-external experiment must be interpreted with `learning-record` before another
-adaptive experiment is registered. Technical invalidity authorizes `repair` without a hypothesis
-change. Valid falsification, qualification, surprise, or proposed `refine`, `branch`, `pivot`, or
-`stop` requires:
+Every new terminal non-external experiment first receives a fresh controller-attested blind
+analysis, then an author `learning-record`. Interpretations explicitly select scientific,
+protocol, or infrastructure lane. Technical invalidity authorizes `repair`; protocol refinement
+does not mutate a hypothesis. Only a material scientific falsification or mutation requires:
 
 ```bash
 "$PYTHON" "$CAMPAIGN" handoff "$ROOT" --state needs_failure_review \
@@ -140,9 +142,9 @@ change. Valid falsification, qualification, surprise, or proposed `refine`, `bra
 
 Only the controller's fresh `failure_reviewer_running` thread may call `learning-review`. The
 controller checks a different thread ID, unchanged interpretation/result, and a clean unchanged Git
-workspace before adding the independent attestation. Only then may the author use
-`hypothesis-fork` or a scientifically justified `candidate-pivot`. See `research-workflow.md` for
-the exact interpretation, review, and child-hypothesis schemas.
+workspace before adding the independent attestation. The Research Director must then record a
+bounded `director-decision`; only that decision may authorize `hypothesis-fork` or
+`candidate-pivot`. See `lab-operating-model.md` and `research-workflow.md` for the schemas.
 
 Replacing an exhausted portfolio or changing its adapter route sets `portfolio_refresh_required`
 and blocks experiment registration. Run `learning-reseed --reason REASON` after recording the new
@@ -243,9 +245,11 @@ Stages are evidence classes, not labels chosen to bypass review:
 
 - `discovery`, `profile`: bounded observation or feasibility probes; novelty clearance is not required
 - `sanity`: infrastructure and real-path witness; novelty clearance is not required
+- `scout`: concept-bound integrated mechanism witness; preliminary novelty and exploratory ceiling
+- `pilot`: Director-promoted competitive test; preliminary novelty and pilot-authorized protocol
 - `novelty_probe`: only after `conditional_probe`; at most three attempts, 1,000 SU total (reduced for small envelopes), one GPU/four hours per job, and 32 persistent entries
 - `baseline`, `audit`, `paper`: require a mission-compatible resolved contribution
-- `pilot`, `main`, `ablation`: require a mission-accepted primary contribution cleared directly or by attested third-thread arbitration
+- `main`, `ablation`: require claim maturity, claim freeze, and exhaustive novelty clearance
 
 The CLI checks the classification when the experiment is registered and again immediately
 before batch or interactive submission. A stale or changed artifact therefore blocks a
@@ -261,8 +265,13 @@ For later work, declare dependencies and an evidence stage:
 "$PYTHON" "$CAMPAIGN" experiment-add "$ROOT" \
   --id main-seeds --stage main --mode batch \
   --evidence-role confirmatory --hypothesis-id CANDIDATE_ID \
+  --cell-id claim-main-seeds --maturity claim --protocol-revision 3 \
+  --decision-question "Does the frozen method beat the matched baseline?" \
+  --decision-if-supports "Proceed to independent replication." \
+  --decision-if-falsifies "Narrow or reject the paper claim." \
   --depends-on sanity-001 \
   --queue dgxa100 --project ey69 --walltime 08:00:00 \
+  --compatible-queue dgxa100 --resource-rationale "Frozen matched A100 evidence." \
   --ncpus 16 --ngpus 1 --mem-gb 128 --jobfs-gb 300 \
   --expected-files 24 --success-file aggregate_metrics.json \
   --command-json '["/env/bin/python","{WORKSPACE}/run_bundle.py","--manifest","{WORKSPACE}/configs/main-seeds.json","--output","{RESULT_DIR}/aggregate_metrics.json"]'
@@ -310,7 +319,7 @@ exit
 
 `interactive-run` executes the registered argument vector through the frozen image and writes only below `$PBS_JOBFS/gadi-autoresearch-output/ID`. It may be rerun while debugging. Each rerun records the current clean Git commit and replaces only the preceding failed staging directory inside jobfs; a command failure does not close the PBS shell or release the GPU. A successful run cannot be overwritten: publish it or close the allocation deliberately. `interactive-publish` is allowed only after the latest run exits zero and the success marker exists; it enforces the declared entry limit and atomically publishes compact output. Do not mark the attempt terminal until the interactive shell has exited. A failed or cancelled allocation may be closed without publication.
 
-`--debug-for` is required when repairing the latest interpreted `technical_invalid / repair` GPU batch in the same cell. The receipt must use the successor batch's GPU queue and the same hypothesis, publish successfully, close as completed, and end on the exact source commit used by that batch. It may use a different queue from the failed batch only when the recorded hardware route justifies the change. `submit` rejects the successor otherwise. This gate does not apply to a valid scientific falsification, qualification, or predeclared safety gate.
+`--debug-for` is required when repairing the latest interpreted `technical_invalid / repair` CPU or GPU batch in the same cell. The receipt must use the successor batch's queue and the same hypothesis, publish successfully, close as completed, and end on the exact source commit used by that batch. A queue change requires a new routed scientific attempt rather than silently moving the debug receipt. This gate does not apply to valid scientific or protocol evidence.
 
 `interactive-close --actual-walltime` records a useful manual estimate, but it is not scheduler evidence. The campaign therefore keeps the full requested SU reserved for that attempt. Only `resources_used.walltime` obtained by the rate-limited PBS refresh can reduce committed SU below the job's maximum charge.
 
@@ -365,13 +374,16 @@ Record phase changes and canonical artifacts:
   --path "$ROOT/RESULTS.md" --assurance deterministic
 ```
 
-Every agent turn ends with one handoff. In `novelty_review`, the author must use
+Every agent turn ends with one handoff. New-territory discovery may use
+`needs_opportunity_scouts`; the controller runs all blind scout roles before returning to the
+Director. A new terminal experiment uses `needs_evidence_analysis` before author interpretation.
+In `novelty_review`, the author must use
 `needs_novelty_review` until an attested verdict exists; the reviewer hands back to
 `needs_agent`. After a conditional verdict, the author uses `waiting_pbs` for probes and then
 `needs_novelty_arbitration` only after registering the bound rebuttal; the arbiter hands back to
-`needs_agent`. After a terminal experiment, record its learning interpretation. When that record
-requires independent causal review, the author uses `needs_failure_review`; only the fresh critic
-returns to `needs_agent`. `complete` runs the artifact gate and refuses active jobs, stale/empty or
+`needs_agent`. When an interpretation requires material scientific review, the author uses
+`needs_failure_review`; after the fresh critic returns, the Director records the decision.
+`complete` runs the artifact gate and refuses active jobs, stale/empty or
 expired novelty artifacts, an invalid PDF, or missing required evidence. A safety pause can be
 resumed only with an explicit reason:
 

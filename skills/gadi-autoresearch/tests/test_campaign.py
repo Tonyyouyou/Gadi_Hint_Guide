@@ -199,6 +199,7 @@ class CampaignTests(unittest.TestCase):
         stage: str,
         *,
         expected_files: int = 8,
+        cell_id: str | None = None,
     ) -> tuple[int, str, str]:
         return self.call(
             "experiment-add",
@@ -229,6 +230,16 @@ class CampaignTests(unittest.TestCase):
             "metrics.json",
             "--command-json",
             '["/env/bin/python","{WORKSPACE}/train.py","--output","{RESULT_DIR}/metrics.json"]',
+            "--cell-id",
+            cell_id or f"{experiment_id}-cell",
+            "--decision-question",
+            f"Does {experiment_id} change the registered mechanism decision?",
+            "--decision-if-supports",
+            "Continue the bounded branch at its registered maturity.",
+            "--decision-if-falsifies",
+            "Stop or revise the branch after independent analysis.",
+            "--resource-rationale",
+            "One GPU is the smallest compatible resource for this unit-test witness.",
         )
 
     def add_sanity(self, *, expected_files: int = 8) -> tuple[int, str, str]:
@@ -272,7 +283,15 @@ class CampaignTests(unittest.TestCase):
             '["/env/bin/python","{WORKSPACE}/train.py","--output","{RESULT_DIR}/metrics.json"]',
         ]
         if debug_for:
-            arguments.extend(["--debug-for", debug_for])
+            state = CAMPAIGN.load_state(self.root)
+            arguments.extend(
+                [
+                    "--debug-for",
+                    debug_for,
+                    "--cell-id",
+                    state["experiments"][debug_for]["scientific_cell_id"],
+                ]
+            )
         return self.call(*arguments)
 
     def record_artifact(self, name: str, path: Path, assurance: str) -> None:
@@ -424,6 +443,34 @@ class CampaignTests(unittest.TestCase):
         code, _, error = self.call(*arguments)
         self.assertEqual(code, 0, error)
         if not adopt_current_claim:
+            # Higher-level legacy tests exercise claim-bound behavior rather than the
+            # promotion workflow itself. Seed the prerequisite state explicitly; the
+            # operating-model tests below exercise the public commands end to end.
+            with CAMPAIGN.locked_state(self.root) as state:
+                graph_sha256 = CAMPAIGN.sha256_file(Path(state["learning"]["graph_path"]))
+                lab = CAMPAIGN.ensure_research_os(state)
+                lab["portfolio"]["concept_freeze"] = {
+                    "hypothesis_id": "adaptive-replay",
+                    "graph_sha256": graph_sha256,
+                    "frozen_at": CAMPAIGN.utc_now(),
+                    "preliminary_novelty": {
+                        "schema_version": 1,
+                        "decision": "proceed_scout",
+                        "fixture": True,
+                    },
+                }
+                lab["portfolio"]["branch_maturity"]["adaptive-replay"] = "claim"
+                lab["signal"]["core_signal_finding_ids"] = ["fixture-core-signal"]
+                lab["signal"]["first_core_signal_at"] = CAMPAIGN.utc_now()
+                lab["protocol"].update(
+                    {
+                        "revision": 1,
+                        "protocol_id": "unit-test-protocol",
+                        "status": "authorize_pilot",
+                        "claim_ceiling": "pilot",
+                        "scope": ["unit-test claim-bound behavior"],
+                    }
+                )
             code, _, error = self.call(
                 "claim-freeze",
                 str(self.root),
@@ -433,6 +480,49 @@ class CampaignTests(unittest.TestCase):
                 "unit-test claim freeze",
             )
             self.assertEqual(code, 0, error)
+
+    def attest_independent_analysis(self, experiment_id: str) -> None:
+        with CAMPAIGN.locked_state(self.root) as state:
+            experiment = state["experiments"][experiment_id]
+            entries = CAMPAIGN.load_learning_ledger(state)
+            if any(
+                entry.get("entry_type") == "independent_analysis"
+                and entry.get("experiment_id") == experiment_id
+                for entry in entries
+            ):
+                return
+            result_sha256 = None
+            if CAMPAIGN.experiment_status(experiment) == "completed":
+                result_sha256 = CAMPAIGN.sha256_file(Path(experiment["success_file"]))
+            entries.append(
+                {
+                    "schema_version": 1,
+                    "entry_type": "independent_analysis",
+                    "experiment_id": experiment_id,
+                    "hypothesis_id": CAMPAIGN.experiment_hypothesis_id(experiment),
+                    "validity": "valid"
+                    if CAMPAIGN.experiment_status(experiment) == "completed"
+                    else "technical_invalid",
+                    "likely_outcome": "inconclusive"
+                    if CAMPAIGN.experiment_status(experiment) == "completed"
+                    else "not_scientific",
+                    "recommended_lane": "scientific"
+                    if CAMPAIGN.experiment_status(experiment) == "completed"
+                    else "infrastructure",
+                    "observed": "The fixture analyst inspected the immutable compact result.",
+                    "validity_rationale": "The terminal status and result marker were checked independently.",
+                    "causal_assessment": "The fixture makes no claim beyond the registered test.",
+                    "decision_relevance": "The Director can now interpret the result.",
+                    "alternative_explanations": [],
+                    "threats": [],
+                    "recorded_at": CAMPAIGN.utc_now(),
+                    "result_sha256": result_sha256,
+                    "experiment_sha256": CAMPAIGN.sha256_json(experiment),
+                    "independent": True,
+                    "analyst_thread_id": "fresh-analyst-thread",
+                }
+            )
+            CAMPAIGN.rewrite_learning_ledger(state, entries)
 
     def write_interpretation(
         self,
@@ -445,13 +535,19 @@ class CampaignTests(unittest.TestCase):
     ) -> Path:
         state = CAMPAIGN.load_state(self.root)
         experiment = state["experiments"][experiment_id]
+        self.attest_independent_analysis(experiment_id)
+        material = next_action in {"refine", "branch", "pivot", "stop", "park", "kill"}
+        lane = "infrastructure" if validity != "valid" else "scientific"
         payload = {
-            "schema_version": 1,
+            "schema_version": CAMPAIGN.research_learning.LEDGER_SCHEMA_VERSION,
             "finding_id": finding_id,
             "experiment_id": experiment_id,
             "hypothesis_id": experiment["hypothesis_binding"]["hypothesis_id"],
             "evidence_role": experiment["evidence_role"],
             "validity": validity,
+            "lane": lane,
+            "materiality": "branch_material" if material else "nonmaterial",
+            "decision_scope": "branch" if material else "local",
             "outcome": outcome,
             "expected": "The registered prediction should separate the mechanism from its baseline.",
             "observed": "The bounded test produced the recorded terminal outcome.",
@@ -1137,6 +1233,16 @@ class CampaignTests(unittest.TestCase):
             "metrics.json",
             "--command-json",
             '["/env/bin/python","{WORKSPACE}/train.py"]',
+            "--cell-id",
+            "main-001-cell",
+            "--decision-question",
+            "Does the registered mechanism outperform the bound baseline?",
+            "--decision-if-supports",
+            "Continue to the registered claim test.",
+            "--decision-if-falsifies",
+            "Stop the claim branch.",
+            "--resource-rationale",
+            "One A100 is the smallest compatible resource for this test.",
         )
         self.assertEqual(code, 0, error)
         with mock.patch.object(CAMPAIGN, "lint_script", return_value={"errors": [], "warnings": [], "summary": {}}):
@@ -1478,6 +1584,53 @@ class CampaignTests(unittest.TestCase):
         state = CAMPAIGN.load_state(self.root)
         self.assertNotEqual(state["skill_reference"]["commit"], "0" * 40)
         self.assertEqual(state["status"], "draft")
+
+    def test_major_skill_adoption_demotes_legacy_claim_and_rotates_director(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        self.assertEqual(
+            self.call(
+                "handoff",
+                str(self.root),
+                "--state",
+                "paused",
+                "--reason",
+                "adopt new lab operating model",
+            )[0],
+            0,
+        )
+        with CAMPAIGN.locked_state(self.root) as state:
+            state.pop("research_os", None)
+            state["control"]["thread_id"] = "legacy-author-thread"
+            state["skill_reference"]["commit"] = "0" * 40
+        code, _, error = self.call(
+            "skill-adopt",
+            str(self.root),
+            "--by",
+            "unit-test",
+            "--reason",
+            "migrate to staged multi-agent operating model",
+            "--rotate-author",
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        graph = CAMPAIGN.load_research_graph(state)
+        self.assertIsNone(graph["claim_hypothesis_id"])
+        self.assertIsNone(state["learning"]["claim_freeze"])
+        concept = state["research_os"]["portfolio"]["concept_freeze"]
+        self.assertEqual(concept["hypothesis_id"], "adaptive-replay")
+        self.assertEqual(
+            state["research_os"]["portfolio"]["branch_maturity"]["adaptive-replay"],
+            "scout",
+        )
+        self.assertIsNone(state["control"]["thread_id"])
+        self.assertTrue(
+            any(
+                entry.get("event") == "legacy_claim_demoted_to_concept"
+                for entry in state["history"]
+            )
+        )
 
     def test_expected_files_are_enforced_before_submission(self) -> None:
         self.init(max_files=8)
@@ -2122,6 +2275,249 @@ class CampaignTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("missing artifacts", error)
 
+    def test_concept_signal_director_and_protocol_gate_pilot(self) -> None:
+        self.init(max_su=10_000)
+        self.approve()
+        self.write_candidate_portfolio()
+        code, _, error = self.call(
+            "learning-init",
+            str(self.root),
+            "--reason",
+            "test concept-first promotion",
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("scout-before-freeze", "scout")
+        self.assertNotEqual(code, 0)
+        self.assertIn("concept", error)
+
+        preliminary = self.base / "preliminary-novelty.json"
+        preliminary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "hypothesis_id": "adaptive-replay",
+                    "mechanism_without_brand": "Use stability to choose replay boundaries.",
+                    "queries": ["stability replay boundary", "adaptive selective replay"],
+                    "primary_sources": [
+                        {
+                            "title": f"Checked source {index}",
+                            "url": f"https://example.org/preliminary-{index}",
+                            "checked_locator": f"Section {index}",
+                            "mechanism_delta": "The source lacks the registered coupling.",
+                        }
+                        for index in (1, 2)
+                    ],
+                    "nearest_work_delta": "No checked source couples the score to replay scope.",
+                    "exact_prior_found": False,
+                    "decision": "proceed_scout",
+                    "checked_at": CAMPAIGN.utc_now(),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.call(
+            "concept-freeze",
+            str(self.root),
+            "--hypothesis-id",
+            "adaptive-replay",
+            "--file",
+            str(preliminary),
+            "--reason",
+            "bounded nearest-prior search found no exact implementation",
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("integrated-scout", "scout")
+        self.assertEqual(code, 0, error)
+        self.complete_probe("integrated-scout")
+        interpretation = self.write_interpretation(
+            "integrated-scout",
+            validity="valid",
+            outcome="supports",
+            next_action="continue",
+            finding_id="integrated-core-signal",
+        )
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(interpretation)
+        )
+        self.assertEqual(code, 0, error)
+
+        decision = self.base / "promote-pilot.json"
+        decision.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "decision_id": "promote-integrated-pilot",
+                    "hypothesis_id": "adaptive-replay",
+                    "decision": "promote",
+                    "maturity_before": "scout",
+                    "maturity_after": "pilot",
+                    "finding_ids": ["integrated-core-signal"],
+                    "critic_inputs": [],
+                    "question": "Does the integrated mechanism produce a real-path signal?",
+                    "rationale": "The completed scout supports the predeclared mechanism signature.",
+                    "next_question": "Does the signal beat the competitive pilot baseline?",
+                    "core_signal": "positive",
+                    "next_budget": {
+                        "max_jobs": 3,
+                        "max_su": 1000,
+                        "max_turns": 4,
+                        "max_protocol_diagnostics": 1,
+                    },
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.call(
+            "director-decision", str(self.root), "--file", str(decision)
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("pilot-before-protocol", "pilot")
+        self.assertNotEqual(code, 0)
+        self.assertIn("claim_ceiling=pilot", error)
+
+        protocol = self.base / "pilot-protocol.json"
+        protocol.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "protocol_id": "integrated-pilot-protocol",
+                    "revision": 1,
+                    "parent_revision": 0,
+                    "decision": "authorize_pilot",
+                    "claim_ceiling": "pilot",
+                    "scope": ["registered unit-test model and metric"],
+                    "hard_blockers": [],
+                    "warnings": ["cross-family generalization is out of scope"],
+                    "evidence_ids": ["integrated-scout"],
+                    "rationale": "The scout output validates the bounded pilot endpoint.",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.call(
+            "protocol-record", str(self.root), "--file", str(protocol)
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.add_batch("authorized-pilot", "pilot")
+        self.assertEqual(code, 0, error)
+
+        with CAMPAIGN.locked_state(self.root) as state:
+            active = state["research_os"]["portfolio"]["active_budget"]
+            state["control"]["agent_turns"] = (
+                int(active["baseline"]["agent_turns"]) + int(active["limits"]["max_turns"])
+            )
+        code, _, error = self.add_batch("budget-exhausted", "sanity")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Director", error)
+
+    def test_completed_science_requires_attested_analysis(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        code, _, error = self.add_batch("blind-analysis-scout", "scout")
+        self.assertEqual(code, 0, error)
+        self.complete_probe("blind-analysis-scout")
+        interpretation = self.write_interpretation(
+            "blind-analysis-scout",
+            validity="valid",
+            outcome="qualifies",
+            next_action="continue",
+            finding_id="blind-analysis-finding",
+        )
+        with CAMPAIGN.locked_state(self.root) as state:
+            entries = [
+                entry
+                for entry in CAMPAIGN.load_learning_ledger(state)
+                if entry.get("experiment_id") != "blind-analysis-scout"
+                or entry.get("entry_type") != "independent_analysis"
+            ]
+            CAMPAIGN.rewrite_learning_ledger(state, entries)
+        self.assertIn(
+            "blind-analysis-scout",
+            CAMPAIGN.pending_independent_analysis_ids(CAMPAIGN.load_state(self.root)),
+        )
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(interpretation)
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("blind independent analysis", error)
+        self.attest_independent_analysis("blind-analysis-scout")
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(interpretation)
+        )
+        self.assertEqual(code, 0, error)
+
+    def test_protocol_interpretation_does_not_summon_mechanism_critic(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        code, _, error = self.add_sanity()
+        self.assertEqual(code, 0, error)
+        self.complete_probe("sanity-001")
+        interpretation = self.write_interpretation(
+            "sanity-001",
+            validity="valid",
+            outcome="qualifies",
+            next_action="protocol_refine",
+            finding_id="protocol-scope-finding",
+        )
+        payload = json.loads(interpretation.read_text(encoding="utf-8"))
+        payload.update(
+            {
+                "lane": "protocol",
+                "materiality": "claim_material",
+                "decision_scope": "claim",
+            }
+        )
+        interpretation.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(interpretation)
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        self.assertIsNone(state["learning"]["pending_failure_review"])
+        finding = CAMPAIGN.learning_interpretation_by_finding(state, "protocol-scope-finding")
+        self.assertFalse(finding["review_required"])
+
+    def test_third_material_review_is_capped_for_director(self) -> None:
+        self.init()
+        self.approve()
+        self.initialize_learning()
+        code, _, error = self.add_sanity()
+        self.assertEqual(code, 0, error)
+        self.complete_probe("sanity-001")
+        with CAMPAIGN.locked_state(self.root) as state:
+            state["research_os"]["review_chain"] = {
+                "hypothesis_id": "adaptive-replay",
+                "count": 2,
+                "finding_ids": ["older-review-one", "older-review-two"],
+            }
+        interpretation = self.write_interpretation(
+            "sanity-001",
+            validity="valid",
+            outcome="unexpected",
+            next_action="branch",
+            finding_id="third-material-finding",
+        )
+        code, _, error = self.call(
+            "learning-record", str(self.root), "--file", str(interpretation)
+        )
+        self.assertEqual(code, 0, error)
+        state = CAMPAIGN.load_state(self.root)
+        finding = CAMPAIGN.learning_interpretation_by_finding(state, "third-material-finding")
+        self.assertFalse(finding["review_required"])
+        self.assertTrue(finding["review_capped_for_director"])
+        self.assertEqual(
+            state["research_os"]["portfolio"]["director_decision_required"],
+            "third-material-finding",
+        )
+
     def test_technical_failure_records_repair_without_scientific_review(self) -> None:
         self.init()
         self.approve()
@@ -2146,7 +2542,9 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         state = CAMPAIGN.load_state(self.root)
         self.assertIsNone(state["learning"]["pending_failure_review"])
-        code, _, error = self.add_batch("sanity-repair", "sanity")
+        code, _, error = self.add_batch(
+            "sanity-repair", "sanity", cell_id="sanity-001-cell"
+        )
         self.assertEqual(code, 0, error)
 
     def test_gpu_batch_repair_requires_matching_interactive_receipt(self) -> None:
@@ -2168,7 +2566,9 @@ class CampaignTests(unittest.TestCase):
             "learning-record", str(self.root), "--file", str(interpretation)
         )
         self.assertEqual(code, 0, error)
-        code, _, error = self.add_batch("sanity-repair", "sanity")
+        code, _, error = self.add_batch(
+            "sanity-repair", "sanity", cell_id="sanity-001-cell"
+        )
         self.assertEqual(code, 0, error)
         code, _, error = self.call("submit", str(self.root), "--id", "sanity-repair")
         self.assertNotEqual(code, 0)
@@ -2325,16 +2725,26 @@ class CampaignTests(unittest.TestCase):
         review_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": CAMPAIGN.research_learning.LEDGER_SCHEMA_VERSION,
                     "finding_id": "unexpected-boundary-one",
                     "decision": "accept",
                     "failure_class": "anomaly",
+                    "review_kind": "mechanism",
+                    "objection_severity": "claim_scope",
                     "allowed_action": "branch",
                     "material_change": True,
                     "validity_assessment": "The compact output is a valid controlled observation.",
                     "rationale": "A parallel mechanism is warranted, but the parent remains testable.",
+                    "affected_claim": "The boundary controller is uniform across workloads.",
+                    "decision_changed": "Authorize one bounded branch while retaining the parent evidence.",
                     "required_test": "Test the child on a new workload before any confirmatory claim.",
                     "alternative_explanations": ["A workload-specific interaction may explain the effect."],
+                    "estimated_cost": {
+                        "jobs": 1,
+                        "hours": 1,
+                        "su": 4,
+                        "persistent_entries": 2,
+                    },
                 },
                 indent=2,
             )
@@ -2416,6 +2826,38 @@ class CampaignTests(unittest.TestCase):
                 }
             )
             state["learning"]["pending_failure_review"] = None
+        director_path = self.base / "director-branch.json"
+        director_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "decision_id": "branch-unexpected-boundary",
+                    "hypothesis_id": "adaptive-replay",
+                    "decision": "branch",
+                    "maturity_before": "claim",
+                    "maturity_after": "claim",
+                    "finding_ids": ["unexpected-boundary-one"],
+                    "critic_inputs": ["fresh-critic-thread"],
+                    "question": "Does the valid anomaly justify a bounded parallel hypothesis?",
+                    "rationale": "The critic accepted the material branch while preserving parent evidence.",
+                    "next_question": "Does the workload-conditioned mechanism reproduce independently?",
+                    "core_signal": "mixed",
+                    "next_budget": {
+                        "max_jobs": 1,
+                        "max_su": 4,
+                        "max_turns": 2,
+                        "max_protocol_diagnostics": 0,
+                    },
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        code, _, error = self.call(
+            "director-decision", str(self.root), "--file", str(director_path)
+        )
+        self.assertEqual(code, 0, error)
         code, _, error = self.call(
             "hypothesis-fork",
             str(self.root),
@@ -2444,12 +2886,120 @@ class CampaignTests(unittest.TestCase):
         self.initialize_learning()
         idea, audit, review = self.record_method_clearance()
         state = CAMPAIGN.load_state(self.root)
+        source_commit = CAMPAIGN.git_workspace_info(self.workspace)["commit"]
+        evidence_specs = (
+            ("claim-main", "confirmatory", "main", "claim-main-finding"),
+            ("claim-replication", "replication", "audit", "claim-replication-finding"),
+        )
+        for experiment_id, _, _, _ in evidence_specs:
+            result = self.root / "runs" / experiment_id / "metrics.json"
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_text('{"effect": 1.0}\n', encoding="utf-8")
+        with CAMPAIGN.locked_state(self.root) as current:
+            entries = CAMPAIGN.load_learning_ledger(current)
+            for experiment_id, evidence_role, stage, finding_id in evidence_specs:
+                binding = CAMPAIGN.experiment_hypothesis_binding(
+                    current,
+                    evidence_role=evidence_role,
+                    hypothesis_id="adaptive-replay",
+                )
+                result = self.root / "runs" / experiment_id / "metrics.json"
+                current["experiments"][experiment_id] = {
+                    "id": experiment_id,
+                    "stage": stage,
+                    "mode": "batch",
+                    "status": "completed",
+                    "source_commit": source_commit,
+                    "success_file": str(result),
+                    "protocol_revision": 1,
+                    "evidence_role": evidence_role,
+                    "hypothesis_binding": binding,
+                    "attempts": [],
+                }
+                entries.append(
+                    {
+                        "schema_version": CAMPAIGN.research_learning.LEDGER_SCHEMA_VERSION,
+                        "entry_type": "interpretation",
+                        "finding_id": finding_id,
+                        "experiment_id": experiment_id,
+                        "hypothesis_id": "adaptive-replay",
+                        "evidence_role": evidence_role,
+                        "validity": "valid",
+                        "lane": "scientific",
+                        "materiality": "claim_material",
+                        "decision_scope": "claim",
+                        "outcome": "supports",
+                        "expected": "The frozen claim should reproduce under the registered protocol.",
+                        "observed": "The compact result reproduced the registered effect.",
+                        "surprise": "No unregistered deviation was observed.",
+                        "alternative_explanations": [],
+                        "assumption_updates": [],
+                        "information_gain": "high",
+                        "proposed_delta": "Retain the bounded supported claim.",
+                        "next_action": "confirm",
+                        "discriminating_test": "No additional test is required for this fixture.",
+                        "recorded_at": CAMPAIGN.utc_now(),
+                        "experiment_status": "completed",
+                        "source_commit": source_commit,
+                        "result_sha256": CAMPAIGN.sha256_file(result),
+                        "review_required": False,
+                        "confirmation_eligible": True,
+                        "legacy_migration": True,
+                    }
+                )
+            CAMPAIGN.rewrite_learning_ledger(current, entries)
+        state = CAMPAIGN.load_state(self.root)
+        claim_graph = self.root / "CLAIM_GRAPH.json"
+        claim_graph.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "mission_sha256": state["mission_sha256"],
+                    "route_sha256": state["route"]["sha256"],
+                    "research_graph_sha256": CAMPAIGN.sha256_file(
+                        Path(state["learning"]["graph_path"])
+                    ),
+                    "claim_hypothesis_id": "adaptive-replay",
+                    "central_claim_id": "central-claim",
+                    "generated_at": CAMPAIGN.utc_now(),
+                    "claims": [
+                        {
+                            "id": "central-claim",
+                            "text": "The registered mechanism reproduces the bounded effect.",
+                            "status": "supported",
+                            "evidence_finding_ids": [
+                                "claim-main-finding",
+                                "claim-replication-finding",
+                            ],
+                            "experiment_ids": ["claim-main", "claim-replication"],
+                            "source_commits": [source_commit],
+                            "protocol_revisions": [1],
+                            "reproduction_experiment_ids": ["claim-replication"],
+                            "primary_sources": [
+                                {
+                                    "title": "Closest prior",
+                                    "url": "https://example.org/closest-prior",
+                                    "checked_locator": "Section 3",
+                                    "supports": "Defines the registered nearest-work comparison.",
+                                }
+                            ],
+                            "assumptions": ["The registered protocol remains fixed."],
+                            "limitations": ["This is a bounded unit-test claim."],
+                        }
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         paths: dict[str, Path] = {
             "mission": Path(state["artifacts"]["mission"]["path"]),
             "candidate_portfolio": Path(state["artifacts"]["candidate_portfolio"]["path"]),
             "idea_report": idea,
             "novelty_audit": audit,
             "novelty_review": review,
+            "claim_graph": claim_graph,
         }
         paper_output = self.root / "paper"
         paper_output.mkdir(exist_ok=True)
@@ -2487,7 +3037,7 @@ class CampaignTests(unittest.TestCase):
         for name, path in paths.items():
             if name in {"mission", "candidate_portfolio", "idea_report", "novelty_audit", "novelty_review"}:
                 continue
-            assurance = "provisional" if name == "claim_audit" else "deterministic"
+            assurance = "provisional" if name in {"claim_graph", "claim_audit"} else "deterministic"
             code, _, error = self.call(
                 "artifact",
                 str(self.root),

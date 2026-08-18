@@ -27,6 +27,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import adapter_registry
 import research_learning
+import research_operating_model
 
 SCHEMA_VERSION = 2
 PHASES = (
@@ -69,6 +70,7 @@ REQUIRED_COMPLETION_ARTIFACTS = (
     "experiment_ledger",
     "results",
     "experiment_audit",
+    "claim_graph",
     "claim_audit",
     "narrative_report",
     "paper_source",
@@ -158,10 +160,16 @@ CONTROL_PYTHON = Path("/home/561/xz4320/miniconda3/bin/python3")
 LEARNING_GRAPH_NAME = "RESEARCH_GRAPH.json"
 LEARNING_LEDGER_NAME = "LEARNING_LEDGER.jsonl"
 LEARNING_REVIEW_STATES = {"needs_failure_review", "failure_reviewer_running"}
+INDEPENDENT_AGENT_STATES = {
+    "opportunity_scout_running",
+    "evidence_analyst_running",
+    *LEARNING_REVIEW_STATES,
+}
 DEFAULT_EVIDENCE_ROLE = {
     "discovery": "exploratory",
     "profile": "diagnostic",
     "sanity": "diagnostic",
+    "scout": "exploratory",
     NOVELTY_PROBE_STAGE: "exploratory",
     "pilot": "exploratory",
     "baseline": "confirmatory",
@@ -883,18 +891,230 @@ def budget_summary(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def ensure_research_os(state: dict[str, Any]) -> dict[str, Any]:
+    try:
+        state["research_os"] = research_operating_model.ensure_state(
+            state.get("research_os"),
+            now=state.get("created_at") or utc_now(),
+        )
+    except research_operating_model.OperatingModelError as exc:
+        raise CampaignError(str(exc)) from exc
+    return state["research_os"]
+
+
+def interpretation_lane(entry: dict[str, Any]) -> str:
+    lane = entry.get("lane")
+    if lane in research_operating_model.LANES:
+        return lane
+    if entry.get("validity") != "valid":
+        return "infrastructure"
+    if entry.get("next_action") in {"protocol_refine", "narrow_scope"}:
+        return "protocol"
+    return "scientific"
+
+
+def decision_budget_usage(state: dict[str, Any]) -> dict[str, Any] | None:
+    lab = research_operating_model.ensure_state(
+        state.get("research_os"),
+        now=state.get("created_at") or utc_now(),
+    )
+    active = lab["portfolio"].get("active_budget")
+    if not isinstance(active, dict):
+        return None
+    current = budget_summary(state)
+    baseline = active["baseline"]
+    recorded_at = parse_time(active["recorded_at"])
+    protocol_diagnostics = sum(
+        1
+        for entry in (load_learning_ledger(state) if learning_enabled(state) else [])
+        if entry.get("entry_type") == "interpretation"
+        and interpretation_lane(entry) == "protocol"
+        and parse_time(entry["recorded_at"]) >= recorded_at
+    )
+    used = {
+        "jobs": max(0, int(current["jobs_submitted"]) - int(baseline["jobs_submitted"])),
+        "su": max(0.0, float(current["committed_su"]) - float(baseline["committed_su"])),
+        "turns": max(
+            0,
+            int(state["control"].get("agent_turns", 0)) - int(baseline["agent_turns"]),
+        ),
+        "protocol_diagnostics": protocol_diagnostics,
+    }
+    limits = active["limits"]
+    exhausted = [
+        name
+        for name, limit_key in (
+            ("jobs", "max_jobs"),
+            ("su", "max_su"),
+            ("turns", "max_turns"),
+        )
+        if used[name] >= float(limits[limit_key])
+    ]
+    return {**active, "used": used, "exhausted": exhausted}
+
+
+def require_open_decision_budget(state: dict[str, Any]) -> None:
+    usage = decision_budget_usage(state)
+    if usage and usage["exhausted"]:
+        raise CampaignError(
+            "director decision budget exhausted ("
+            + ", ".join(usage["exhausted"])
+            + "); record a new bounded Research Director decision before adaptive work"
+        )
+
+
+def research_health(state: dict[str, Any]) -> dict[str, Any]:
+    lab = research_operating_model.ensure_state(
+        state.get("research_os"),
+        now=state.get("created_at") or utc_now(),
+    )
+    entries = load_learning_ledger(state) if learning_enabled(state) else []
+    interpretations = [entry for entry in entries if entry.get("entry_type") == "interpretation"]
+    reviews = [entry for entry in entries if entry.get("entry_type") == "failure_review"]
+    analyses = [entry for entry in entries if entry.get("entry_type") == "independent_analysis"]
+    terminal_attempts = [
+        attempt
+        for experiment in state.get("experiments", {}).values()
+        for attempt in experiment.get("attempts", [])
+        if attempt.get("status") in JOB_TERMINAL
+    ]
+    cells = {
+        experiment.get("scientific_cell_id") or experiment_id
+        for experiment_id, experiment in state.get("experiments", {}).items()
+        if experiment.get("mode") != "external"
+    }
+    core_cells = {
+        experiment.get("scientific_cell_id") or experiment_id
+        for experiment_id, experiment in state.get("experiments", {}).items()
+        if experiment.get("mode") != "external" and experiment.get("core_mechanism_test") is True
+    }
+    technical_invalid = sum(
+        1 for entry in interpretations if entry.get("validity") == "technical_invalid"
+    )
+    active_budget = decision_budget_usage(state)
+    if active_budget:
+        protocol_diagnostics = int(active_budget["used"]["protocol_diagnostics"])
+    else:
+        protocol_diagnostics = sum(
+            1 for entry in interpretations if interpretation_lane(entry) == "protocol"
+        )
+    scientific_findings = [entry for entry in interpretations if interpretation_lane(entry) == "scientific"]
+    core_signal_ids = list(lab["signal"].get("core_signal_finding_ids", []))
+    created = parse_time(state["created_at"])
+    elapsed_hours = max(
+        0.0,
+        (dt.datetime.now(dt.timezone.utc) - created).total_seconds() / 3600,
+    )
+    invalid_fraction = technical_invalid / len(interpretations) if interpretations else 0.0
+    budget = budget_summary(state)
+    breakers = lab["circuit_breakers"]
+    alerts: list[dict[str, Any]] = []
+    if (
+        not core_signal_ids
+        and elapsed_hours >= float(breakers["hours_to_first_core_signal"])
+        and len(cells) >= int(breakers["max_cells_without_core_signal"])
+    ):
+        alerts.append(
+            {
+                "code": "no_core_signal",
+                "severity": "director_action",
+                "required_action": (
+                    "run one integrated real-path core-mechanism scout within the next decision "
+                    "budget, or park/pivot the branch"
+                ),
+            }
+        )
+    if active_budget and active_budget["exhausted"]:
+        alerts.append(
+            {
+                "code": "director_budget_exhausted",
+                "severity": "director_action",
+                "required_action": (
+                    "record the next bounded Director decision before registering or submitting "
+                    "more adaptive work"
+                ),
+                "exhausted": active_budget["exhausted"],
+            }
+        )
+    if (
+        len(interpretations) >= int(breakers["min_terminal_attempts_for_invalid_fraction"])
+        and invalid_fraction > float(breakers["technical_invalid_fraction"])
+    ):
+        alerts.append(
+            {
+                "code": "technical_invalid_rate",
+                "severity": "workflow",
+                "required_action": "reuse one interactive allocation and stop batch edit-run retries",
+            }
+        )
+    protocol_limit = int(
+        active_budget["limits"]["max_protocol_diagnostics"]
+        if active_budget
+        else breakers["max_protocol_diagnostics_per_decision"]
+    )
+    if protocol_diagnostics > protocol_limit:
+        alerts.append(
+            {
+                "code": "protocol_diagnostic_growth",
+                "severity": "director_action",
+                "required_action": "authorize a scoped experiment, narrow scope, or stop the protocol chain",
+            }
+        )
+    if (
+        not core_signal_ids
+        and budget["workspace_entry_delta"]
+        > int(breakers["max_inode_growth_per_core_signal"])
+    ):
+        alerts.append(
+            {
+                "code": "inode_growth_without_signal",
+                "severity": "storage",
+                "required_action": "reuse stable filenames, compact outputs, and repack Git before new diagnostics",
+            }
+        )
+    return {
+        "mode": lab["mode"],
+        "elapsed_hours": round(elapsed_hours, 2),
+        "scientific_cells": len(cells),
+        "core_mechanism_cells": len(core_cells),
+        "terminal_attempts": len(terminal_attempts),
+        "interpretations": len(interpretations),
+        "independent_analyses": len(analyses),
+        "scientific_findings": len(scientific_findings),
+        "protocol_diagnostics": protocol_diagnostics,
+        "technical_invalid_fraction": round(invalid_fraction, 3),
+        "independent_reviews": len(reviews),
+        "core_signal_finding_ids": core_signal_ids,
+        "time_to_first_core_signal_hours": (
+            round(
+                (parse_time(lab["signal"]["first_core_signal_at"]) - created).total_seconds()
+                / 3600,
+                2,
+            )
+            if lab["signal"].get("first_core_signal_at")
+            else None
+        ),
+        "active_decision_budget": active_budget,
+        "alerts": alerts,
+    }
+
+
 def control_after_terminal_attempt(state: dict[str, Any], reason: str) -> None:
     active = any(
         attempt.get("status") in JOB_ACTIVE
         for experiment in state["experiments"].values()
         for attempt in experiment.get("attempts", [])
     )
-    state["control"].update(
-        {
-            "state": "waiting_pbs" if active else "needs_agent",
-            "reason": "other tracked PBS work is still active" if active else reason,
-        }
-    )
+    if active:
+        control_state = "waiting_pbs"
+        control_reason = "other tracked PBS work is still active"
+    elif pending_independent_analysis_ids(state):
+        control_state = "needs_evidence_analysis"
+        control_reason = "terminal scientific evidence requires a blind independent analysis"
+    else:
+        control_state = "needs_agent"
+        control_reason = reason
+    state["control"].update({"state": control_state, "reason": control_reason})
 
 
 def require_approved(
@@ -1059,6 +1279,14 @@ def ensure_submission_budget(state: dict[str, Any], experiment: dict[str, Any]) 
         raise CampaignError("campaign concurrent-job limit is reached")
     if summary["committed_su"] + float(experiment["max_su"]) > float(state["approval"]["max_su"]):
         raise CampaignError("submission would exceed the campaign SU envelope")
+    decision_usage = decision_budget_usage(state)
+    if decision_usage:
+        limits = decision_usage["limits"]
+        used = decision_usage["used"]
+        if int(used["jobs"]) + 1 > int(limits["max_jobs"]):
+            raise CampaignError("submission would exceed the active Director job budget")
+        if float(used["su"]) + float(experiment["max_su"]) > float(limits["max_su"]):
+            raise CampaignError("submission would exceed the active Director SU budget")
     projected_files = (
         summary["actual_persistent_entries"]
         + summary["reserved_experiment_entries"]
@@ -1211,6 +1439,9 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
             "novelty_arbitration_requested_at": None,
             "failure_review_thread_id": None,
             "failure_review_requested_at": None,
+            "opportunity_scout_thread_ids": {},
+            "analysis_thread_id": None,
+            "analysis_experiment_id": None,
             "agent_turns": 0,
             "last_agent_at": None,
             "last_pbs_poll_at": None,
@@ -1227,6 +1458,7 @@ def build_state(args: argparse.Namespace, root: Path, workspace: Path) -> dict[s
         },
         "artifacts": {},
         "learning": None,
+        "research_os": research_operating_model.new_state(created, mode=args.research_mode),
         "experiments": {},
         "history": [{"at": created, "event": "campaign_initialized"}],
     }
@@ -1403,6 +1635,7 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
             raise CampaignError("cannot adopt a dirty gadi-autoresearch skill checkout")
         previous = state.get("skill_reference")
         previous_registry = state.get("adapter_registry")
+        legacy_operating_model = state.get("research_os") is None
         try:
             registry = adapter_registry.load_registry()
             validate_mission_binding(state, registry)
@@ -1445,6 +1678,7 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
                 "experiment_ledger",
                 "results",
                 "experiment_audit",
+                "claim_graph",
                 "claim_audit",
                 "narrative_report",
                 "paper_source",
@@ -1472,8 +1706,58 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
         state["control"].setdefault("novelty_arbitration_requested_at", None)
         state["control"].setdefault("failure_review_thread_id", None)
         state["control"].setdefault("failure_review_requested_at", None)
-        state["control"].setdefault("lease", None)
+        state["control"].setdefault("opportunity_scout_thread_ids", {})
+        state["control"].setdefault("analysis_thread_id", None)
+        state["control"].setdefault("analysis_experiment_id", None)
+        state["control"]["lease"] = None
+        previous_author_thread = None
+        if args.rotate_author:
+            previous_author_thread = state["control"].get("thread_id")
+            state["control"]["thread_id"] = None
         state.setdefault("learning", None)
+        try:
+            state["research_os"] = research_operating_model.ensure_state(
+                state.get("research_os"),
+                now=utc_now(),
+            )
+        except research_operating_model.OperatingModelError as exc:
+            raise CampaignError(str(exc)) from exc
+        if learning_enabled(state):
+            graph = load_research_graph(state)
+            maturity = state["research_os"]["portfolio"]["branch_maturity"]
+            for hypothesis_id in graph["active_hypothesis_ids"]:
+                maturity.setdefault(hypothesis_id, "scout")
+            freeze = state["learning"].get("claim_freeze")
+            if freeze and not state["research_os"]["portfolio"].get("concept_freeze"):
+                state["research_os"]["portfolio"]["concept_freeze"] = {
+                    "hypothesis_id": freeze["hypothesis_id"],
+                    "graph_sha256": freeze["graph_sha256"],
+                    "frozen_at": freeze["frozen_at"],
+                    "preliminary_novelty": {
+                        "legacy_adoption": True,
+                        "source": "existing attested full novelty review",
+                    },
+                }
+            if legacy_operating_model and freeze:
+                hypothesis_id = freeze["hypothesis_id"]
+                graph["claim_hypothesis_id"] = None
+                graph["claim_frozen_at"] = None
+                graph["revision"] += 1
+                graph["updated_at"] = utc_now()
+                state["learning"]["claim_freeze"] = None
+                state["learning"]["legacy_novelty_adopted"] = False
+                write_research_graph(state, graph)
+                state["research_os"]["portfolio"]["branch_maturity"][hypothesis_id] = "scout"
+                state["research_os"]["portfolio"]["concept_freeze"]["graph_sha256"] = state[
+                    "learning"
+                ]["graph_sha256"]
+                add_history(
+                    state,
+                    "legacy_claim_demoted_to_concept",
+                    hypothesis_id=hypothesis_id,
+                    reason="new operating model requires fresh core evidence before claim maturity",
+                )
+        state["research_os"]["updated_at"] = utc_now()
         state["control"].setdefault(
             "recovery",
             {
@@ -1501,6 +1785,8 @@ def cmd_skill_adopt(args: argparse.Namespace) -> None:
             previous_registry=previous_registry,
             current_registry=state.get("adapter_registry"),
             invalidated_artifacts=invalidated,
+            author_thread_rotated=bool(args.rotate_author),
+            previous_author_thread=previous_author_thread,
         )
         print(json.dumps({"previous": previous, "current": current}, indent=2))
 
@@ -1537,6 +1823,8 @@ def cmd_status(args: argparse.Namespace) -> None:
         "approval": state["approval"],
         "budget": budget_summary(state),
         "learning": learning,
+        "research_os": state.get("research_os"),
+        "research_health": research_health(state),
         "experiments": {
             key: {
                 "stage": value["stage"],
@@ -1547,6 +1835,13 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "max_su": value.get("max_su"),
                 "expected_files": value.get("expected_files"),
                 "evidence_role": value.get("evidence_role"),
+                "scientific_cell_id": value.get("scientific_cell_id"),
+                "technical_attempt": value.get("technical_attempt"),
+                "decision_question": value.get("decision_question"),
+                "maturity": value.get("maturity"),
+                "core_mechanism_test": value.get("core_mechanism_test"),
+                "protocol_revision": value.get("protocol_revision"),
+                "resource_route": value.get("resource_route"),
                 "hypothesis_binding": value.get("hypothesis_binding"),
                 "attempts": value.get("attempts", []),
             }
@@ -1622,6 +1917,7 @@ def cmd_route_set(args: argparse.Namespace) -> None:
             "experiment_ledger",
             "results",
             "experiment_audit",
+            "claim_graph",
             "claim_audit",
             "narrative_report",
             "paper_source",
@@ -1817,19 +2113,51 @@ def interpretation_entries(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def independent_analysis_entries(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not learning_enabled(state):
+        return {}
+    return {
+        entry["experiment_id"]: entry
+        for entry in load_learning_ledger(state)
+        if entry.get("entry_type") == "independent_analysis"
+        and isinstance(entry.get("experiment_id"), str)
+    }
+
+
+def experiment_requires_independent_analysis(experiment: dict[str, Any]) -> bool:
+    return bool(
+        experiment.get("operating_model_version") == research_operating_model.SCHEMA_VERSION
+        and experiment.get("mode") == "batch"
+        and experiment_status(experiment) == "completed"
+        and experiment.get("evidence_role") in {"exploratory", "confirmatory", "replication"}
+        and experiment.get("stage")
+        in {"discovery", "scout", NOVELTY_PROBE_STAGE, "pilot", "baseline", "main", "ablation", "audit"}
+    )
+
+
+def pending_independent_analysis_ids(state: dict[str, Any]) -> list[str]:
+    if not learning_enabled(state):
+        return []
+    analysed = independent_analysis_entries(state)
+    return sorted(
+        experiment_id
+        for experiment_id, experiment in state["experiments"].items()
+        if experiment_requires_independent_analysis(experiment)
+        and experiment_id not in analysed
+    )
+
+
 def experiment_hypothesis_id(experiment: dict[str, Any]) -> str | None:
     binding = experiment.get("hypothesis_binding")
     return binding.get("hypothesis_id") if isinstance(binding, dict) else None
 
 
-def latest_repairable_gpu_batch(
+def latest_repairable_batch(
     state: dict[str, Any],
     experiment: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
     if (
-        experiment.get("mode") != "batch"
-        or int(experiment.get("resources", {}).get("ngpus", 0)) <= 0
-        or not learning_enabled(state)
+        experiment.get("mode") != "batch" or not learning_enabled(state)
     ):
         return None
     target_hypothesis = experiment_hypothesis_id(experiment)
@@ -1838,8 +2166,12 @@ def latest_repairable_gpu_batch(
     for experiment_id, prior in state["experiments"].items():
         if (
             prior.get("mode") != "batch"
-            or int(prior.get("resources", {}).get("ngpus", 0)) <= 0
-            or prior.get("stage") != experiment.get("stage")
+            or (
+                prior.get("scientific_cell_id") or prior.get("stage")
+            )
+            != (
+                experiment.get("scientific_cell_id") or experiment.get("stage")
+            )
             or experiment_hypothesis_id(prior) != target_hypothesis
         ):
             continue
@@ -1893,8 +2225,8 @@ def matching_interactive_debug_receipt(
     return None
 
 
-def require_gpu_debug_receipt(state: dict[str, Any], experiment: dict[str, Any]) -> None:
-    repair = latest_repairable_gpu_batch(state, experiment)
+def require_debug_receipt(state: dict[str, Any], experiment: dict[str, Any]) -> None:
+    repair = latest_repairable_batch(state, experiment)
     if not repair:
         return
     failed_experiment_id, _ = repair
@@ -1902,7 +2234,7 @@ def require_gpu_debug_receipt(state: dict[str, Any], experiment: dict[str, Any])
     if receipt:
         return
     raise CampaignError(
-        f"GPU batch repair after technical failure {failed_experiment_id} requires a completed "
+        f"batch repair after technical failure {failed_experiment_id} requires a completed "
         "same-queue interactive debug receipt at the exact source commit; register one with "
         f"--mode interactive --evidence-role diagnostic --debug-for {failed_experiment_id}, "
         "reuse its allocation until the command succeeds, publish and close it, record its "
@@ -1926,6 +2258,7 @@ def pending_interpretation_ids(state: dict[str, Any]) -> list[str]:
 def require_learning_cycle_clear(state: dict[str, Any]) -> None:
     if not learning_enabled(state):
         return
+    require_open_decision_budget(state)
     if state["learning"].get("portfolio_refresh_required"):
         raise CampaignError("reseed the research graph from the new portfolio before adaptive work")
     pending = pending_interpretation_ids(state)
@@ -1937,6 +2270,12 @@ def require_learning_cycle_clear(state: dict[str, Any]) -> None:
     finding_id = state["learning"].get("pending_failure_review")
     if finding_id:
         raise CampaignError(f"fresh failure review is pending for finding {finding_id}")
+    lab = ensure_research_os(state)
+    director_required = lab["portfolio"].get("director_decision_required")
+    if director_required:
+        raise CampaignError(
+            f"research-director arbitration is required for finding {director_required}"
+        )
     unattested = sorted(
         finding
         for finding, review in state["learning"].get("reviews", {}).items()
@@ -1995,6 +2334,7 @@ CLAIM_LINEAGE_ARTIFACTS = (
     "experiment_ledger",
     "results",
     "experiment_audit",
+    "claim_graph",
     "claim_audit",
     "narrative_report",
     "paper_source",
@@ -2133,6 +2473,9 @@ def cmd_learning_init(args: argparse.Namespace) -> None:
             "reviews": {},
             "consumed_findings": {},
         }
+        lab = ensure_research_os(state)
+        for hypothesis_id in graph["active_hypothesis_ids"]:
+            lab["portfolio"]["branch_maturity"].setdefault(hypothesis_id, "seed")
         if args.adopt_current_claim:
             state["learning"]["claim_freeze"] = {
                 "hypothesis_id": graph["claim_hypothesis_id"],
@@ -2141,6 +2484,16 @@ def cmd_learning_init(args: argparse.Namespace) -> None:
                 "frozen_at": graph["claim_frozen_at"],
                 "reason": args.reason,
                 "legacy_adoption": True,
+            }
+            lab["portfolio"]["branch_maturity"][graph["claim_hypothesis_id"]] = "scout"
+            lab["portfolio"]["concept_freeze"] = {
+                "hypothesis_id": graph["claim_hypothesis_id"],
+                "graph_sha256": sha256_file(graph_path),
+                "frozen_at": graph["claim_frozen_at"],
+                "preliminary_novelty": {
+                    "legacy_adoption": True,
+                    "source": "existing attested full novelty review",
+                },
             }
         legacy_entries: list[dict[str, Any]] = []
         for experiment_id, experiment in sorted(state["experiments"].items()):
@@ -2169,6 +2522,9 @@ def cmd_learning_init(args: argparse.Namespace) -> None:
                     "hypothesis_id": hypothesis_id,
                     "evidence_role": role,
                     "validity": "valid" if valid else "technical_invalid",
+                    "lane": "scientific" if valid else "infrastructure",
+                    "materiality": "nonmaterial",
+                    "decision_scope": "local",
                     "outcome": "inconclusive" if valid else "not_scientific",
                     "expected": "The historical experiment predates the learning workflow.",
                     "observed": f"Migrated terminal experiment with recorded status {status}.",
@@ -2202,6 +2558,382 @@ def cmd_learning_init(args: argparse.Namespace) -> None:
             reason=args.reason,
         )
         print(json.dumps(state["learning"], indent=2))
+
+
+def cmd_concept_freeze(args: argparse.Namespace) -> None:
+    preliminary = json_object(canonical(args.file, strict=True), "preliminary novelty")
+    try:
+        preliminary = research_operating_model.validate_preliminary_novelty(preliminary)
+    except research_operating_model.OperatingModelError as exc:
+        raise CampaignError(str(exc)) from exc
+    checked_at = parse_time(preliminary["checked_at"])
+    now_time = dt.datetime.now(dt.timezone.utc)
+    if checked_at > now_time + dt.timedelta(minutes=5):
+        raise CampaignError("preliminary novelty check timestamp is in the future")
+    if now_time - checked_at > dt.timedelta(days=30):
+        raise CampaignError("preliminary novelty check is older than 30 days")
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "freeze a scoped research concept")
+        require_learning_cycle_clear(state)
+        graph = load_research_graph(state)
+        hypothesis = hypothesis_by_id(graph, args.hypothesis_id)
+        if hypothesis["status"] != "active":
+            raise CampaignError("only an active hypothesis can be concept-frozen")
+        if preliminary["hypothesis_id"] != hypothesis["id"]:
+            raise CampaignError("preliminary novelty is bound to a different hypothesis")
+        if preliminary["decision"] != "proceed_scout":
+            raise CampaignError("an exact preliminary prior requires pivot rather than concept freeze")
+        lab = ensure_research_os(state)
+        prior = lab["portfolio"].get("concept_freeze")
+        if prior and prior.get("hypothesis_id") == hypothesis["id"]:
+            raise CampaignError("this hypothesis is already concept-frozen")
+        if prior and prior.get("hypothesis_id") != hypothesis["id"]:
+            invalidate_claim_lineage(
+                state,
+                reason=f"concept changed from {prior.get('hypothesis_id')} to {hypothesis['id']}",
+            )
+        now = utc_now()
+        lab["portfolio"]["concept_freeze"] = {
+            "hypothesis_id": hypothesis["id"],
+            "graph_sha256": sha256_file(canonical(state["learning"]["graph_path"], strict=True)),
+            "frozen_at": now,
+            "preliminary_novelty": preliminary,
+        }
+        lab["portfolio"]["branch_maturity"][hypothesis["id"]] = "scout"
+        lab["updated_at"] = now
+        add_history(
+            state,
+            "concept_frozen",
+            hypothesis_id=hypothesis["id"],
+            preliminary_novelty_sha256=sha256_json(preliminary),
+            reason=args.reason,
+        )
+        print(json.dumps(lab["portfolio"]["concept_freeze"], indent=2))
+
+
+def cmd_protocol_record(args: argparse.Namespace) -> None:
+    payload = json_object(canonical(args.file, strict=True), "protocol revision")
+    try:
+        protocol = research_operating_model.validate_protocol_revision(payload)
+    except research_operating_model.OperatingModelError as exc:
+        raise CampaignError(str(exc)) from exc
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "revise the evaluation protocol")
+        lab = ensure_research_os(state)
+        current = lab["protocol"]
+        if protocol["revision"] != int(current["revision"]) + 1:
+            raise CampaignError("protocol revisions must advance exactly one revision")
+        if protocol["parent_revision"] != int(current["revision"]):
+            raise CampaignError("protocol parent_revision must match the current revision")
+        unknown = sorted(set(protocol["evidence_ids"]) - set(state["experiments"]))
+        if unknown:
+            raise CampaignError("protocol references unknown experiments: " + ", ".join(unknown))
+        nonterminal = [
+            experiment_id
+            for experiment_id in protocol["evidence_ids"]
+            if experiment_status(state["experiments"][experiment_id]) not in JOB_TERMINAL
+        ]
+        if nonterminal:
+            raise CampaignError("protocol evidence is not terminal: " + ", ".join(nonterminal))
+        open_invalidating = [
+            blocker["id"]
+            for blocker in protocol["hard_blockers"]
+            if blocker["severity"] == "hard_invalidating" and blocker["status"] == "open"
+        ]
+        if protocol["decision"] == "freeze_confirmatory" and open_invalidating:
+            raise CampaignError(
+                "cannot freeze a confirmatory protocol with open hard-invalidating blockers: "
+                + ", ".join(open_invalidating)
+            )
+        now = utc_now()
+        snapshot = {
+            "revision": protocol["revision"],
+            "protocol_id": protocol["protocol_id"],
+            "decision": protocol["decision"],
+            "claim_ceiling": protocol["claim_ceiling"],
+            "scope": protocol["scope"],
+            "hard_blockers": protocol["hard_blockers"],
+            "warnings": protocol["warnings"],
+            "evidence_ids": protocol["evidence_ids"],
+            "rationale": protocol["rationale"],
+            "updated_at": now,
+        }
+        history = list(current.get("history", []))
+        history.append(snapshot)
+        del history[:-32]
+        current.update(snapshot)
+        current["status"] = protocol["decision"]
+        current["history"] = history
+        lab["updated_at"] = now
+        entries = load_learning_ledger(state) if learning_enabled(state) else []
+        if learning_enabled(state):
+            entries.append(
+                {
+                    "schema_version": research_learning.LEDGER_SCHEMA_VERSION,
+                    "entry_type": "protocol_revision",
+                    "recorded_at": now,
+                    **protocol,
+                }
+            )
+            rewrite_learning_ledger(state, entries)
+        add_history(
+            state,
+            "protocol_revised",
+            revision=protocol["revision"],
+            protocol_id=protocol["protocol_id"],
+            decision=protocol["decision"],
+            claim_ceiling=protocol["claim_ceiling"],
+        )
+        print(json.dumps(current, indent=2))
+
+
+def director_decision_by_finding(state: dict[str, Any], finding_id: str) -> dict[str, Any] | None:
+    lab = ensure_research_os(state)
+    for decision in reversed(lab["director_decisions"]):
+        if finding_id in decision.get("finding_ids", []):
+            return decision
+    return None
+
+
+def cmd_director_decision(args: argparse.Namespace) -> None:
+    payload = json_object(canonical(args.file, strict=True), "director decision")
+    try:
+        decision = research_operating_model.validate_director_decision(payload)
+    except research_operating_model.OperatingModelError as exc:
+        raise CampaignError(str(exc)) from exc
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        require_author_control(state, "make a portfolio decision")
+        if not learning_enabled(state):
+            raise CampaignError("initialize hypothesis evolution before director decisions")
+        if state["learning"].get("pending_failure_review"):
+            raise CampaignError("complete the pending critic turn before the director arbitrates")
+        lab = ensure_research_os(state)
+        if any(item["decision_id"] == decision["decision_id"] for item in lab["director_decisions"]):
+            raise CampaignError("director decision id already exists")
+        graph = load_research_graph(state)
+        hypothesis = hypothesis_by_id(graph, decision["hypothesis_id"])
+        current_maturity = lab["portfolio"]["branch_maturity"].get(hypothesis["id"], "seed")
+        if decision["maturity_before"] != current_maturity:
+            raise CampaignError(
+                f"director decision expects maturity {decision['maturity_before']}, current is {current_maturity}"
+            )
+        interpretations = {
+            entry["finding_id"]: entry
+            for entry in load_learning_ledger(state)
+            if entry.get("entry_type") == "interpretation"
+        }
+        unknown = sorted(set(decision["finding_ids"]) - set(interpretations))
+        if unknown:
+            raise CampaignError("director decision references unknown findings: " + ", ".join(unknown))
+        for finding_id in decision["finding_ids"]:
+            if interpretations[finding_id].get("hypothesis_id") != hypothesis["id"]:
+                raise CampaignError("director decision mixes findings from another hypothesis")
+        material_actions = {"refine", "branch", "pivot", "park", "kill", "stop"}
+        if decision["decision"] in material_actions and decision["finding_ids"]:
+            finding_id = decision["finding_ids"][-1]
+            review = state["learning"].get("reviews", {}).get(finding_id, {})
+            chain = lab["review_chain"]
+            exhausted = (
+                lab["portfolio"].get("director_decision_required") == finding_id
+                and int(chain.get("count", 0)) >= int(lab["authority"]["max_reviews_per_chain"])
+            )
+            if not review.get("independent") and not exhausted:
+                raise CampaignError("a material director mutation requires an independent critic or an exhausted review chain")
+            if review.get("independent"):
+                allowed = review.get("allowed_action")
+                compatible = {
+                    "stop": {"stop", "park", "kill"},
+                    "kill": {"kill", "park", "stop"},
+                    "park": {"park", "stop"},
+                }.get(allowed, {allowed})
+                if decision["decision"] not in compatible:
+                    raise CampaignError(
+                        f"director decision {decision['decision']} conflicts with critic action {allowed}"
+                    )
+        if decision["decision"] in {"promote", "confirm", "refine", "branch"}:
+            for finding_id in decision["finding_ids"]:
+                attestation = state["learning"].get("reviews", {}).get(finding_id, {})
+                if not attestation.get("independent"):
+                    continue
+                review_entry = learning_failure_review_by_finding(state, finding_id)
+                if review_entry.get("objection_severity") == "hard_invalidating":
+                    raise CampaignError(
+                        "a hard-invalidating critic objection vetoes promotion, confirmation, or "
+                        "hypothesis mutation until new valid evidence resolves it"
+                    )
+        if decision["decision"] == "promote" and decision["core_signal"] not in {
+            "positive",
+            "mixed",
+        }:
+            raise CampaignError("promotion requires a recorded positive or mixed core signal")
+        if decision["core_signal"] in {"positive", "mixed"}:
+            supportive = [
+                finding_id
+                for finding_id in decision["finding_ids"]
+                if interpretations[finding_id].get("validity") == "valid"
+                and interpretation_lane(interpretations[finding_id]) == "scientific"
+                and interpretations[finding_id].get("outcome") in {"supports", "qualifies", "unexpected"}
+            ]
+            if not supportive:
+                raise CampaignError("a positive/mixed core signal requires valid scientific evidence")
+        if decision["decision"] == "confirm":
+            if (
+                decision["maturity_before"] not in {"claim", "paper"}
+                or decision["maturity_after"] != decision["maturity_before"]
+            ):
+                raise CampaignError("confirmation is valid only at unchanged claim or paper maturity")
+            eligible = [
+                finding_id
+                for finding_id in decision["finding_ids"]
+                if interpretations[finding_id].get("confirmation_eligible")
+            ]
+            if not eligible:
+                raise CampaignError("confirmation requires confirmation-eligible frozen-protocol evidence")
+        if decision["decision"] == "promote" and decision["maturity_after"] == "paper":
+            reproductions = [
+                finding_id
+                for finding_id in decision["finding_ids"]
+                if interpretations[finding_id].get("confirmation_eligible")
+                and interpretations[finding_id].get("evidence_role") == "replication"
+            ]
+            if not reproductions:
+                raise CampaignError("promotion to paper requires a valid independent replication finding")
+        if decision["maturity_after"] == "claim":
+            ceiling = lab["protocol"]["claim_ceiling"]
+            if ceiling not in {"pilot", "confirmatory", "submission"}:
+                raise CampaignError("promotion to claim requires at least a pilot-authorized protocol")
+        now = utc_now()
+        record = {**decision, "recorded_at": now, "director_thread_id": state["control"].get("thread_id")}
+        lab["director_decisions"].append(record)
+        del lab["director_decisions"][:-64]
+        lab["portfolio"]["branch_maturity"][hypothesis["id"]] = decision["maturity_after"]
+        lab["portfolio"]["last_director_decision_id"] = decision["decision_id"]
+        lab["portfolio"]["director_decision_required"] = None
+        budget = budget_summary(state)
+        lab["portfolio"]["active_budget"] = {
+            "decision_id": decision["decision_id"],
+            "hypothesis_id": hypothesis["id"],
+            "recorded_at": now,
+            "limits": dict(decision["next_budget"]),
+            "baseline": {
+                "jobs_submitted": int(budget["jobs_submitted"]),
+                "committed_su": float(budget["committed_su"]),
+                "agent_turns": int(state["control"].get("agent_turns", 0)),
+            },
+        }
+        if decision["core_signal"] != "none":
+            signal_ids = lab["signal"]["core_signal_finding_ids"]
+            for finding_id in decision["finding_ids"]:
+                if finding_id not in signal_ids:
+                    signal_ids.append(finding_id)
+            if lab["signal"].get("first_core_signal_at") is None:
+                lab["signal"]["first_core_signal_at"] = now
+        if decision["decision"] not in {"continue", "narrow_scope", "protocol_refine"}:
+            lab["review_chain"] = {"hypothesis_id": None, "count": 0, "finding_ids": []}
+        lab["updated_at"] = now
+        entries = load_learning_ledger(state)
+        entries.append(
+            {
+                "schema_version": research_learning.LEDGER_SCHEMA_VERSION,
+                "entry_type": "director_decision",
+                **record,
+            }
+        )
+        rewrite_learning_ledger(state, entries)
+        add_history(
+            state,
+            "director_decision_recorded",
+            decision_id=decision["decision_id"],
+            hypothesis_id=hypothesis["id"],
+            decision=decision["decision"],
+            maturity_after=decision["maturity_after"],
+            core_signal=decision["core_signal"],
+        )
+        print(json.dumps(record, indent=2))
+
+
+def cmd_scout_record(args: argparse.Namespace) -> None:
+    payload = json_object(canonical(args.file, strict=True), "opportunity scout report")
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        if state["control"]["state"] != "opportunity_scout_running":
+            raise CampaignError("scout reports may be recorded only by a controller-launched scout")
+        lab = ensure_research_os(state)
+        scouting = lab["scouting"]
+        role = scouting.get("active_role")
+        try:
+            report = research_operating_model.validate_scout_report(
+                payload,
+                expected_role=role,
+                expected_round=int(scouting["round"]),
+            )
+        except research_operating_model.OperatingModelError as exc:
+            raise CampaignError(str(exc)) from exc
+        if role in scouting["reports"]:
+            raise CampaignError("this scout role already recorded a report in the active round")
+        scouting["reports"][role] = {
+            **report,
+            "recorded_at": utc_now(),
+            "independent": False,
+            "thread_id": None,
+        }
+        lab["updated_at"] = utc_now()
+        add_history(state, "opportunity_scout_recorded", role=role, round=scouting["round"])
+        print(json.dumps(scouting["reports"][role], indent=2))
+
+
+def cmd_analysis_record(args: argparse.Namespace) -> None:
+    payload = json_object(canonical(args.file, strict=True), "independent evidence analysis")
+    try:
+        analysis = research_operating_model.validate_independent_analysis(payload)
+    except research_operating_model.OperatingModelError as exc:
+        raise CampaignError(str(exc)) from exc
+    with locked_state(args.root) as state:
+        require_approved(state)
+        require_current_skill(state)
+        if state["control"]["state"] != "evidence_analyst_running":
+            raise CampaignError("independent analysis may be recorded only by the controller's fresh analyst")
+        expected_id = state["control"].get("analysis_experiment_id")
+        if analysis["experiment_id"] != expected_id:
+            raise CampaignError("analysis is bound to a different experiment")
+        experiment = state["experiments"].get(expected_id)
+        if not experiment or experiment.get("mode") == "external":
+            raise CampaignError("analysis references an unknown scientific experiment")
+        if not experiment_requires_independent_analysis(experiment):
+            raise CampaignError(
+                "blind analysis is reserved for completed evidence-bearing scientific batches"
+            )
+        if analysis["hypothesis_id"] != experiment_hypothesis_id(experiment):
+            raise CampaignError("analysis is bound to a different hypothesis")
+        entries = load_learning_ledger(state)
+        if any(
+            entry.get("entry_type") == "independent_analysis"
+            and entry.get("experiment_id") == expected_id
+            for entry in entries
+        ):
+            raise CampaignError("this experiment already has an independent analysis")
+        success = canonical(experiment["success_file"], strict=True)
+        result_sha256 = sha256_file(success)
+        entry = {
+            **analysis,
+            "entry_type": "independent_analysis",
+            "recorded_at": utc_now(),
+            "result_sha256": result_sha256,
+            "experiment_sha256": sha256_json(experiment),
+            "independent": False,
+            "analyst_thread_id": None,
+        }
+        entries.append(entry)
+        rewrite_learning_ledger(state, entries)
+        add_history(state, "independent_analysis_recorded", experiment_id=expected_id)
+        print(json.dumps(entry, indent=2))
 
 
 def cmd_learning_reseed(args: argparse.Namespace) -> None:
@@ -2299,6 +3031,11 @@ def cmd_learning_reseed(args: argparse.Namespace) -> None:
         state["learning"]["claim_freeze"] = None
         state["learning"]["legacy_novelty_adopted"] = False
         write_research_graph(state, graph)
+        lab = ensure_research_os(state)
+        lab["portfolio"]["concept_freeze"] = None
+        lab["portfolio"]["branch_maturity"] = {
+            hypothesis_id: "seed" for hypothesis_id in active_ids
+        }
         entries = load_learning_ledger(state)
         entries.append(
             {
@@ -2370,6 +3107,16 @@ def cmd_learning_record(args: argparse.Namespace) -> None:
             raise CampaignError("interpretation is bound to a different hypothesis")
         if interpretation["evidence_role"] != experiment.get("evidence_role"):
             raise CampaignError("interpretation evidence role differs from experiment registration")
+        analysis = independent_analysis_entries(state).get(experiment_id)
+        if experiment_requires_independent_analysis(experiment):
+            if not analysis or not analysis.get("independent"):
+                raise CampaignError(
+                    "record and controller-attest a blind independent analysis before author interpretation"
+                )
+            if analysis.get("result_sha256"):
+                success = canonical(experiment["success_file"], strict=True)
+                if sha256_file(success) != analysis["result_sha256"]:
+                    raise CampaignError("experiment output changed after independent analysis")
         graph = load_research_graph(state)
         hypothesis = hypothesis_by_id(graph, interpretation["hypothesis_id"])
         assumption_ids = {item["id"] for item in hypothesis["assumptions"]}
@@ -2386,11 +3133,24 @@ def cmd_learning_record(args: argparse.Namespace) -> None:
             if not success.is_file():
                 raise CampaignError("completed experiment has no regular success marker")
             result_sha256 = sha256_file(success)
+        lab = ensure_research_os(state)
         review_needed = research_learning.review_required(interpretation)
+        review_capped = False
+        if review_needed:
+            chain = lab["review_chain"]
+            if chain.get("hypothesis_id") not in {None, interpretation["hypothesis_id"]}:
+                chain.update({"hypothesis_id": interpretation["hypothesis_id"], "count": 0, "finding_ids": []})
+            maximum = int(lab["authority"]["max_reviews_per_chain"])
+            if chain.get("hypothesis_id") == interpretation["hypothesis_id"] and int(chain.get("count", 0)) >= maximum:
+                review_needed = False
+                review_capped = True
+                lab["portfolio"]["director_decision_required"] = interpretation["finding_id"]
         confirmation_eligible = bool(
             interpretation["evidence_role"] in {"confirmatory", "replication"}
             and interpretation["validity"] == "valid"
             and interpretation["outcome"] == "supports"
+            and interpretation["lane"] == "scientific"
+            and lab["protocol"]["claim_ceiling"] in {"confirmatory", "submission"}
             and interpretation["finding_id"] not in hypothesis.get("origin_finding_ids", [])
         )
         entry = {
@@ -2402,7 +3162,9 @@ def cmd_learning_record(args: argparse.Namespace) -> None:
             "registered_graph_sha256": binding.get("graph_sha256"),
             "result_sha256": result_sha256,
             "review_required": review_needed,
+            "review_capped_for_director": review_capped,
             "confirmation_eligible": confirmation_eligible,
+            "independent_analysis_sha256": sha256_json(analysis) if analysis else None,
             "legacy_migration": False,
             "author_thread_id": state["control"].get("thread_id"),
         }
@@ -2424,6 +3186,7 @@ def cmd_learning_record(args: argparse.Namespace) -> None:
             outcome=interpretation["outcome"],
             next_action=interpretation["next_action"],
             review_required=review_needed,
+            review_capped_for_director=review_capped,
             confirmation_eligible=confirmation_eligible,
         )
         print(json.dumps(entry, indent=2))
@@ -2490,13 +3253,10 @@ def cmd_hypothesis_fork(args: argparse.Namespace) -> None:
         require_learning_cycle_clear(state)
         finding_id = args.finding_id
         interpretation = learning_interpretation_by_finding(state, finding_id)
-        review = learning_failure_review_by_finding(state, finding_id)
-        attestation = state["learning"].get("reviews", {}).get(finding_id, {})
-        if not attestation.get("independent") or review.get("decision") == "reject":
-            raise CampaignError("hypothesis mutation requires an accepted independent failure review")
-        if review.get("allowed_action") != args.kind:
+        director = director_decision_by_finding(state, finding_id)
+        if not director or director.get("decision") != args.kind:
             raise CampaignError(
-                f"failure review authorizes {review.get('allowed_action')}, not {args.kind}"
+                f"hypothesis mutation requires a research-director decision authorizing {args.kind}"
             )
         if state["learning"].get("consumed_findings", {}).get(finding_id):
             raise CampaignError("this finding has already produced a hypothesis mutation")
@@ -2546,6 +3306,9 @@ def cmd_hypothesis_fork(args: argparse.Namespace) -> None:
         state["learning"]["legacy_novelty_adopted"] = False
         state["learning"]["consumed_findings"][finding_id] = child["id"]
         write_research_graph(state, graph)
+        lab = ensure_research_os(state)
+        lab["portfolio"]["concept_freeze"] = None
+        lab["portfolio"]["branch_maturity"][child["id"]] = "scout"
         state["control"].update({"state": "needs_agent", "wake_at": None})
         add_history(
             state,
@@ -2569,6 +3332,17 @@ def cmd_claim_freeze(args: argparse.Namespace) -> None:
         hypothesis = hypothesis_by_id(graph, args.hypothesis_id)
         if hypothesis["status"] != "active":
             raise CampaignError("only an active hypothesis can be frozen as the paper-facing claim")
+        lab = ensure_research_os(state)
+        concept = lab["portfolio"].get("concept_freeze")
+        if not isinstance(concept, dict) or concept.get("hypothesis_id") != args.hypothesis_id:
+            raise CampaignError("claim freeze requires the same hypothesis to be concept-frozen first")
+        maturity = lab["portfolio"]["branch_maturity"].get(args.hypothesis_id, "seed")
+        if maturity != "claim":
+            raise CampaignError("promote the branch to claim maturity through a director decision first")
+        if not lab["signal"].get("core_signal_finding_ids"):
+            raise CampaignError("claim freeze requires at least one director-attested core signal")
+        if lab["protocol"]["claim_ceiling"] not in {"pilot", "confirmatory", "submission"}:
+            raise CampaignError("claim freeze requires a pilot-authorized evaluation protocol")
         current = state["learning"].get("claim_freeze")
         if current and current.get("hypothesis_id") == args.hypothesis_id:
             raise CampaignError("this hypothesis is already frozen; do not refresh the timestamp opportunistically")
@@ -2582,6 +3356,7 @@ def cmd_claim_freeze(args: argparse.Namespace) -> None:
         graph["revision"] += 1
         graph["updated_at"] = now
         write_research_graph(state, graph)
+        concept["graph_sha256"] = state["learning"]["graph_sha256"]
         state["learning"]["claim_freeze"] = {
             "hypothesis_id": args.hypothesis_id,
             "graph_revision": graph["revision"],
@@ -2809,6 +3584,7 @@ def pivot_to_backup(
         "experiment_ledger",
         "results",
         "experiment_audit",
+        "claim_graph",
         "claim_audit",
         "narrative_report",
         "paper_source",
@@ -2881,6 +3657,118 @@ def validate_human_evaluation(state: dict[str, Any], path: Path) -> dict[str, An
     if not isinstance(limitations, list):
         raise CampaignError("human_evaluation.limitations must be a list")
     return evidence
+
+
+def validate_claim_graph(state: dict[str, Any], path: Path) -> dict[str, Any]:
+    payload = json_object(path, "claim graph")
+    try:
+        claim_graph = research_operating_model.validate_claim_graph(payload)
+    except research_operating_model.OperatingModelError as exc:
+        raise CampaignError(str(exc)) from exc
+    if not learning_enabled(state):
+        raise CampaignError("claim graph requires initialized hypothesis evolution")
+    graph = load_research_graph(state)
+    freeze = state["learning"].get("claim_freeze")
+    if not isinstance(freeze, dict):
+        raise CampaignError("claim graph requires a current frozen claim")
+    route = validate_route(state)
+    if claim_graph["mission_sha256"] != state["mission_sha256"]:
+        raise CampaignError("claim graph is bound to a different mission")
+    if claim_graph["route_sha256"] != route["sha256"]:
+        raise CampaignError("claim graph is bound to a different adapter route")
+    graph_sha256 = sha256_file(canonical(state["learning"]["graph_path"], strict=True))
+    if claim_graph["research_graph_sha256"] != graph_sha256:
+        raise CampaignError("claim graph is bound to a stale research graph")
+    if claim_graph["claim_hypothesis_id"] != graph.get("claim_hypothesis_id"):
+        raise CampaignError("claim graph is bound to a different frozen hypothesis")
+    findings = {
+        entry["finding_id"]: entry
+        for entry in load_learning_ledger(state)
+        if entry.get("entry_type") == "interpretation"
+    }
+    central = next(
+        item for item in claim_graph["claims"] if item["id"] == claim_graph["central_claim_id"]
+    )
+    for claim in claim_graph["claims"]:
+        unknown_findings = sorted(set(claim["evidence_finding_ids"]) - set(findings))
+        if unknown_findings:
+            raise CampaignError(
+                f"claim {claim['id']} references unknown findings: " + ", ".join(unknown_findings)
+            )
+        unknown_experiments = sorted(set(claim["experiment_ids"]) - set(state["experiments"]))
+        if unknown_experiments:
+            raise CampaignError(
+                f"claim {claim['id']} references unknown experiments: "
+                + ", ".join(unknown_experiments)
+            )
+        claim_findings = [findings[finding_id] for finding_id in claim["evidence_finding_ids"]]
+        if any(
+            finding.get("hypothesis_id") != claim_graph["claim_hypothesis_id"]
+            for finding in claim_findings
+        ):
+            raise CampaignError(
+                f"claim {claim['id']} uses evidence from outside the frozen hypothesis"
+            )
+        finding_experiments = {finding["experiment_id"] for finding in claim_findings}
+        if not finding_experiments.issubset(set(claim["experiment_ids"])):
+            raise CampaignError(
+                f"claim {claim['id']} omits an experiment that generated its evidence"
+            )
+        experiments = [state["experiments"][experiment_id] for experiment_id in claim["experiment_ids"]]
+        commits = {experiment.get("source_commit") for experiment in experiments}
+        if None in commits or not commits.issubset(set(claim["source_commits"])):
+            raise CampaignError(f"claim {claim['id']} omits an evidence source commit")
+        revisions = {int(experiment.get("protocol_revision", 0)) for experiment in experiments}
+        if not revisions.issubset(set(claim["protocol_revisions"])):
+            raise CampaignError(f"claim {claim['id']} omits an evidence protocol revision")
+        reproduction_ids = set(claim["reproduction_experiment_ids"])
+        if not reproduction_ids.issubset(set(claim["experiment_ids"])):
+            raise CampaignError(
+                f"claim {claim['id']} reproduction experiments must also be evidence experiments"
+            )
+        if any(
+            state["experiments"][experiment_id].get("evidence_role") != "replication"
+            for experiment_id in reproduction_ids
+        ):
+            raise CampaignError(
+                f"claim {claim['id']} labels a non-replication experiment as reproduction"
+            )
+    central_findings = [findings[finding_id] for finding_id in central["evidence_finding_ids"]]
+    if not central["reproduction_experiment_ids"]:
+        raise CampaignError("central claim requires an independent reproduction experiment")
+    reproduction_ids = set(central["reproduction_experiment_ids"])
+    reproduction_findings = [
+        finding
+        for finding in central_findings
+        if finding["experiment_id"] in reproduction_ids
+    ]
+    if not reproduction_findings:
+        raise CampaignError("central claim reproduction has no bound interpretation")
+    if any(
+        finding.get("validity") != "valid" or interpretation_lane(finding) != "scientific"
+        for finding in central_findings
+    ):
+        raise CampaignError("central claim may use only valid scientific evidence")
+    allowed_outcomes = {
+        "supported": {"supports"},
+        "qualified": {"supports", "qualifies"},
+        "falsified": {"falsifies"},
+    }[central["status"]]
+    if not any(finding.get("outcome") in allowed_outcomes for finding in central_findings):
+        raise CampaignError("central claim status is inconsistent with its evidence outcomes")
+    if not any(finding.get("outcome") in allowed_outcomes for finding in reproduction_findings):
+        raise CampaignError("independent reproduction does not reproduce the central claim status")
+    if central["status"] in {"supported", "qualified"}:
+        if not any(finding.get("confirmation_eligible") for finding in central_findings):
+            raise CampaignError("supported central claim lacks confirmation-eligible evidence")
+        if not any(finding.get("confirmation_eligible") for finding in reproduction_findings):
+            raise CampaignError(
+                "supported central claim reproduction is not confirmation-eligible"
+            )
+    lab = ensure_research_os(state)
+    if int(lab["protocol"]["revision"]) not in set(central["protocol_revisions"]):
+        raise CampaignError("central claim omits the current frozen protocol revision")
+    return claim_graph
 
 
 def validate_search_matrix(searches: Any, label: str) -> None:
@@ -3472,6 +4360,17 @@ def novelty_resolution(state: dict[str, Any], *, require_primary: bool = False) 
 def require_experiment_novelty(state: dict[str, Any], stage: str) -> None:
     if stage in {"sanity", "profile", "discovery"}:
         return
+    if stage == "scout":
+        current_concept_binding(state)
+        return
+    if stage == "pilot":
+        concept = current_concept_binding(state)
+        if concept.get("preliminary_novelty_decision") not in {
+            "proceed_scout",
+            "legacy_full_review",
+        }:
+            raise CampaignError("pilot work requires a concept freeze with preliminary novelty clearance")
+        return
     if stage == NOVELTY_PROBE_STAGE:
         current_probe_binding(state)
         return
@@ -3479,6 +4378,33 @@ def require_experiment_novelty(state: dict[str, Any], stage: str) -> None:
         novelty_resolution(state, require_primary=True)
         return
     novelty_resolution(state)
+
+
+def current_concept_binding(state: dict[str, Any]) -> dict[str, str]:
+    if not learning_enabled(state):
+        raise CampaignError("concept-bound work requires initialized hypothesis evolution")
+    lab = ensure_research_os(state)
+    freeze = lab["portfolio"].get("concept_freeze")
+    if not isinstance(freeze, dict):
+        raise CampaignError("freeze one scoped concept before scout or pilot work")
+    graph = load_research_graph(state)
+    hypothesis_id = freeze.get("hypothesis_id")
+    hypothesis = hypothesis_by_id(graph, hypothesis_id)
+    if hypothesis["status"] != "active":
+        raise CampaignError("the concept-frozen hypothesis is no longer active")
+    if freeze.get("graph_sha256") != sha256_file(canonical(state["learning"]["graph_path"], strict=True)):
+        raise CampaignError("the concept freeze is stale after a hypothesis-graph change")
+    preliminary = freeze.get("preliminary_novelty") or {}
+    decision = "legacy_full_review" if preliminary.get("legacy_adoption") else preliminary.get("decision")
+    return {
+        "mission_sha256": state["mission_sha256"],
+        "route_sha256": validate_route(state)["sha256"],
+        "hypothesis_id": hypothesis_id,
+        "research_graph_sha256": freeze["graph_sha256"],
+        "concept_frozen_at": freeze["frozen_at"],
+        "preliminary_novelty_sha256": sha256_json(preliminary),
+        "preliminary_novelty_decision": decision,
+    }
 
 
 def current_claim_binding(state: dict[str, Any]) -> dict[str, str]:
@@ -3526,11 +4452,12 @@ def current_claim_binding(state: dict[str, Any]) -> dict[str, str]:
 def require_experiment_claim_binding(state: dict[str, Any], experiment: dict[str, Any]) -> None:
     if experiment["stage"] in {"sanity", "profile", "discovery"}:
         return
-    expected = (
-        current_probe_binding(state)
-        if experiment["stage"] == NOVELTY_PROBE_STAGE
-        else current_claim_binding(state)
-    )
+    if experiment["stage"] in {"scout", "pilot"}:
+        expected = current_concept_binding(state)
+    elif experiment["stage"] == NOVELTY_PROBE_STAGE:
+        expected = current_probe_binding(state)
+    else:
+        expected = current_claim_binding(state)
     if experiment.get("claim_binding") != expected:
         raise CampaignError(
             "experiment is bound to a different candidate or novelty lineage; register a new experiment"
@@ -3541,7 +4468,7 @@ def require_author_control(state: dict[str, Any], action: str) -> None:
     if state["control"]["state"] in {
         "novelty_reviewer_running",
         "novelty_arbiter_running",
-        *LEARNING_REVIEW_STATES,
+        *INDEPENDENT_AGENT_STATES,
     }:
         raise CampaignError(f"an independent evaluator cannot {action}")
 
@@ -3606,15 +4533,10 @@ def cmd_candidate_pivot(args: argparse.Namespace) -> None:
         if learning_enabled(state):
             require_learning_cycle_clear(state)
             if not args.finding_id:
-                raise CampaignError("candidate pivot requires an independently reviewed finding")
-            review = learning_failure_review_by_finding(state, args.finding_id)
-            attestation = state["learning"].get("reviews", {}).get(args.finding_id, {})
-            if not attestation.get("independent") or review.get("decision") == "reject":
-                raise CampaignError("candidate pivot lacks an accepted independent failure review")
-            if review.get("allowed_action") != "pivot":
-                raise CampaignError(
-                    f"failure review authorizes {review.get('allowed_action')}, not pivot"
-                )
+                raise CampaignError("candidate pivot requires a director-reviewed finding")
+            director = director_decision_by_finding(state, args.finding_id)
+            if not director or director.get("decision") != "pivot":
+                raise CampaignError("candidate pivot lacks a research-director pivot decision")
             if state["learning"].get("consumed_findings", {}).get(args.finding_id):
                 raise CampaignError("this finding has already produced a hypothesis mutation")
         candidate_id = pivot_to_backup(
@@ -3667,6 +4589,8 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             raise CampaignError("the independent novelty arbiter may record only novelty_arbitration")
         if state["control"]["state"] in LEARNING_REVIEW_STATES:
             raise CampaignError("the independent failure critic may record only learning-review")
+        if state["control"]["state"] in {"opportunity_scout_running", "evidence_analyst_running"}:
+            raise CampaignError("a scout or evidence analyst may record only its role-specific schema")
         novelty_artifacts = {
             "candidate_portfolio",
             "idea_report",
@@ -3713,6 +4637,10 @@ def cmd_artifact(args: argparse.Namespace) -> None:
             missing = sorted(required - set(sanity)) if isinstance(sanity, dict) else sorted(required)
             if missing or sanity.get("status") != "pass":
                 raise CampaignError("sanity JSON is not a passing witness; missing/invalid: " + ", ".join(missing or ["status"]))
+        if args.name == "claim_graph":
+            if path.suffix != ".json" or args.assurance not in {"provisional", "accepted"}:
+                raise CampaignError("claim_graph must be a provisional or accepted JSON artifact")
+            validate_claim_graph(state, path)
         if args.name == "candidate_portfolio":
             if path.suffix != ".json" or args.assurance != "provisional":
                 raise CampaignError("candidate_portfolio must be a provisional JSON artifact")
@@ -3854,6 +4782,9 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         raise CampaignError("command-json must be a non-empty JSON array of non-empty strings")
     if args.expected_files <= 0:
         raise CampaignError("expected-files must be positive")
+    cell_id = args.cell_id or args.id
+    if not SAFE_ID.fullmatch(cell_id):
+        raise CampaignError("cell-id must start with a letter and contain only letters, digits, ._- ")
     with locked_state(args.root) as state:
         require_approved(state)
         require_current_skill(state)
@@ -3861,6 +4792,7 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         require_author_control(state, "register experiments")
         require_learning_cycle_clear(state)
         require_experiment_novelty(state, args.stage)
+        lab = ensure_research_os(state)
         evidence_role = args.evidence_role or DEFAULT_EVIDENCE_ROLE[args.stage]
         if evidence_role not in research_learning.EVIDENCE_ROLES:
             raise CampaignError(f"unsupported evidence role: {evidence_role}")
@@ -3869,15 +4801,14 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             evidence_role=evidence_role,
             hypothesis_id=args.hypothesis_id,
         )
-        claim_binding = (
-            None
-            if args.stage in {"sanity", "profile", "discovery"}
-            else (
-                current_probe_binding(state)
-                if args.stage == NOVELTY_PROBE_STAGE
-                else current_claim_binding(state)
-            )
-        )
+        if args.stage in {"sanity", "profile", "discovery"}:
+            claim_binding = None
+        elif args.stage in {"scout", "pilot"}:
+            claim_binding = current_concept_binding(state)
+        elif args.stage == NOVELTY_PROBE_STAGE:
+            claim_binding = current_probe_binding(state)
+        else:
+            claim_binding = current_claim_binding(state)
         if args.id in state["experiments"]:
             raise CampaignError(f"experiment already exists: {args.id}")
         image_value = args.image or state["storage"].get("environment")
@@ -3901,6 +4832,32 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             "jobfs_gb": args.jobfs_gb,
         }
         validate_resources(resources, state["approval"], args.mode)
+        compatible_queues = list(dict.fromkeys(args.compatible_queue or [args.queue]))
+        if args.queue not in compatible_queues:
+            raise CampaignError("selected queue must appear in --compatible-queue")
+        unknown_queues = sorted(set(compatible_queues) - set(queue_config()))
+        if unknown_queues:
+            raise CampaignError("unsupported compatible queue(s): " + ", ".join(unknown_queues))
+        if args.fallback_queue and (
+            args.fallback_queue not in compatible_queues or args.fallback_queue == args.queue
+        ):
+            raise CampaignError("fallback-queue must be a different member of the compatible queue set")
+        scientific_stage = args.stage in {
+            "scout",
+            "pilot",
+            "baseline",
+            "main",
+            "ablation",
+            "audit",
+        }
+        if scientific_stage:
+            if not args.decision_question or not args.decision_if_supports or not args.decision_if_falsifies:
+                raise CampaignError(
+                    "scientific experiments require --decision-question, --decision-if-supports, "
+                    "and --decision-if-falsifies"
+                )
+            if resources["ngpus"] and not args.resource_rationale:
+                raise CampaignError("GPU scientific work requires --resource-rationale")
         if args.mode == "interactive":
             validate_interactive_profile(resources)
         if args.debug_for and args.mode != "interactive":
@@ -3912,18 +4869,22 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             interpretation = interpretation_entries(state).get(args.debug_for)
             if (
                 prior.get("mode") != "batch"
-                or int(prior.get("resources", {}).get("ngpus", 0)) <= 0
                 or experiment_status(prior) not in JOB_TERMINAL
                 or not interpretation
                 or interpretation.get("validity") != "technical_invalid"
                 or interpretation.get("next_action") != "repair"
             ):
                 raise CampaignError(
-                    "--debug-for must name a terminal GPU batch with a recorded "
+                    "--debug-for must name a terminal batch with a recorded "
                     "technical_invalid/repair interpretation"
                 )
             if evidence_role != "diagnostic":
-                raise CampaignError("an interactive GPU repair receipt must use evidence-role diagnostic")
+                raise CampaignError("an interactive repair receipt must use evidence-role diagnostic")
+            prior_cell_id = prior.get("scientific_cell_id") or prior["id"]
+            if cell_id != prior_cell_id:
+                raise CampaignError(
+                    "an interactive repair must reuse the failed batch --cell-id"
+                )
             if experiment_hypothesis_id(prior) != (
                 hypothesis_binding.get("hypothesis_id") if hypothesis_binding else None
             ):
@@ -3934,8 +4895,65 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         success_path = result_dir / args.success_file
         if Path(args.success_file).is_absolute() or ".." in Path(args.success_file).parts:
             raise CampaignError("success-file must be a safe path relative to the experiment result directory")
+        maturity_default = {
+            "discovery": "seed",
+            "sanity": "scout",
+            "profile": "scout",
+            "scout": "scout",
+            NOVELTY_PROBE_STAGE: "scout",
+            "pilot": "pilot",
+            "baseline": "claim",
+            "main": "claim",
+            "ablation": "claim",
+            "audit": "paper",
+            "paper": "paper",
+        }[args.stage]
+        maturity = args.maturity or maturity_default
+        if maturity not in research_operating_model.MATURITY_LEVELS:
+            raise CampaignError(f"unsupported experiment maturity: {maturity}")
+        if (
+            learning_enabled(state)
+            and hypothesis_binding
+            and args.stage in {"scout", "pilot", "baseline", "main", "ablation", "audit"}
+        ):
+            branch_maturity = lab["portfolio"]["branch_maturity"].get(
+                hypothesis_binding["hypothesis_id"], "seed"
+            )
+            if (
+                research_operating_model.MATURITY_LEVELS.index(maturity)
+                > research_operating_model.MATURITY_LEVELS.index(branch_maturity)
+            ):
+                raise CampaignError(
+                    f"experiment maturity {maturity} exceeds branch maturity {branch_maturity}; "
+                    "record a Director promotion first"
+                )
+            if args.stage == "pilot" and lab["protocol"]["claim_ceiling"] not in {
+                "pilot",
+                "confirmatory",
+                "submission",
+            }:
+                raise CampaignError("pilot work requires a protocol with claim_ceiling=pilot or higher")
+            if evidence_role in {"confirmatory", "replication"} and lab["protocol"][
+                "claim_ceiling"
+            ] not in {"confirmatory", "submission"}:
+                raise CampaignError(
+                    "confirmatory or replication work requires a frozen confirmatory protocol"
+                )
+        protocol_revision = (
+            args.protocol_revision
+            if args.protocol_revision is not None
+            else int(lab["protocol"]["revision"])
+        )
+        if protocol_revision < 0 or protocol_revision > int(lab["protocol"]["revision"]):
+            raise CampaignError("experiment protocol revision is not registered")
+        prior_cell_experiments = [
+            item
+            for item in state["experiments"].values()
+            if item.get("scientific_cell_id") == cell_id
+        ]
         experiment = {
             "id": args.id,
+            "operating_model_version": research_operating_model.SCHEMA_VERSION,
             "stage": args.stage,
             "mode": args.mode,
             "status": "planned",
@@ -3953,6 +4971,21 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
             "success_file": str(success_path),
             "depends_on": args.depends_on,
             "debug_for": args.debug_for,
+            "scientific_cell_id": cell_id,
+            "technical_attempt": len(prior_cell_experiments) + 1,
+            "decision_question": args.decision_question or "Verify this diagnostic before adaptive work.",
+            "decision_if_supports": args.decision_if_supports or "Continue only within diagnostic scope.",
+            "decision_if_falsifies": args.decision_if_falsifies or "Repair or stop without inventing a scientific update.",
+            "maturity": maturity,
+            "core_mechanism_test": bool(args.core_mechanism_test),
+            "protocol_revision": protocol_revision,
+            "resource_route": {
+                "compatible_queues": compatible_queues,
+                "selected_queue": args.queue,
+                "fallback_queue": args.fallback_queue,
+                "queue_observed_at": args.queue_observed_at,
+                "rationale": args.resource_rationale,
+            },
             "claim_binding": claim_binding,
             "evidence_role": evidence_role,
             "hypothesis_binding": hypothesis_binding,
@@ -3972,6 +5005,20 @@ def cmd_experiment_add(args: argparse.Namespace) -> None:
         if projected > int(state["approval"]["max_persistent_files"]):
             raise CampaignError("experiment would exceed the campaign file envelope")
         state["experiments"][args.id] = experiment
+        cell = lab["infrastructure"]["cells"].setdefault(
+            cell_id,
+            {
+                "created_at": experiment["created_at"],
+                "hypothesis_id": experiment_hypothesis_id(experiment),
+                "decision_question": experiment["decision_question"],
+                "experiment_ids": [],
+            },
+        )
+        if len(cell["experiment_ids"]) >= 16:
+            raise CampaignError("a scientific cell exceeds the bounded 16-experiment repair history")
+        cell["experiment_ids"].append(args.id)
+        cell["updated_at"] = utc_now()
+        lab["updated_at"] = utc_now()
         add_history(state, "experiment_added", experiment_id=args.id, max_su=experiment["max_su"], expected_files=args.expected_files)
         print(json.dumps(experiment, indent=2))
 
@@ -4074,7 +5121,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
     require_dependencies(state, experiment)
     require_registered_inputs(state, experiment)
     validate_resources(experiment["resources"], state["approval"], "batch")
-    require_gpu_debug_receipt(state, experiment)
+    require_debug_receipt(state, experiment)
     ensure_submission_budget(state, experiment)
     preflight = live_preflight(state, experiment["resources"]["project"])
     project_report = preflight["projects"][0]
@@ -4125,7 +5172,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         require_dependencies(current, current_exp)
         require_registered_inputs(current, current_exp)
         validate_resources(current_exp["resources"], current["approval"], "batch")
-        require_gpu_debug_receipt(current, current_exp)
+        require_debug_receipt(current, current_exp)
         ensure_submission_budget(current, current_exp)
         current_exp["attempts"].append(attempt)
         current_exp["status"] = "submitting"
@@ -5241,6 +6288,11 @@ def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
     pending = pending_interpretation_ids(state)
     if pending:
         raise CampaignError("cannot complete with uninterpreted experiments: " + ", ".join(pending))
+    pending_analysis = pending_independent_analysis_ids(state)
+    if pending_analysis:
+        raise CampaignError(
+            "cannot complete without blind analyses for: " + ", ".join(pending_analysis)
+        )
     for entry in load_learning_ledger(state):
         if entry.get("entry_type") == "interpretation" and entry.get("review_required"):
             review = state["learning"].get("reviews", {}).get(entry.get("finding_id"), {})
@@ -5248,11 +6300,16 @@ def verify_completion_artifacts(state: dict[str, Any]) -> tuple[str, str]:
                 raise CampaignError(
                     f"finding {entry.get('finding_id')} lacks an independent failure review"
                 )
+            if not director_decision_by_finding(state, entry["finding_id"]):
+                raise CampaignError(
+                    f"finding {entry.get('finding_id')} lacks a Research Director decision"
+                )
     state["research_track"] = novelty_resolution(state)
     mission_path = artifact_file(state, "mission")
     if sha256_json(json_object(mission_path, "mission")) != state["mission_sha256"]:
         raise CampaignError("recorded mission content does not match campaign state")
     validate_candidate_portfolio(state, artifact_file(state, "candidate_portfolio"))
+    validate_claim_graph(state, artifact_file(state, "claim_graph"))
     if "human_evaluation" in required:
         if state["artifacts"]["human_evaluation"]["assurance"] != "accepted":
             raise CampaignError("required human evaluation must have accepted assurance")
@@ -5323,6 +6380,13 @@ def cmd_handoff(args: argparse.Namespace) -> None:
             "paused",
         }:
             raise CampaignError("an independent novelty evaluator may hand off only to the author, human, or pause")
+        if evaluator == "opportunity_scout_running" and args.state not in {
+            "needs_opportunity_scouts",
+            "paused",
+        }:
+            raise CampaignError("an opportunity scout may only return to the scout coordinator or pause")
+        if evaluator == "evidence_analyst_running" and args.state not in {"needs_agent", "paused"}:
+            raise CampaignError("an evidence analyst may only return its analysis to the director or pause")
         if args.state not in {"waiting_human", "paused", "stopped"}:
             require_current_skill(state)
             pin_missing_skill_reference(state)
@@ -5387,6 +6451,36 @@ def cmd_handoff(args: argparse.Namespace) -> None:
                 finding_id=finding_id,
                 interpretation_sha256=sha256_json(interpretation),
             )
+        if args.state == "needs_opportunity_scouts":
+            lab = ensure_research_os(state)
+            scouting = lab["scouting"]
+            if evaluator == "agent_running":
+                if state["phase"] not in {"territory", "discovery"}:
+                    raise CampaignError("opportunity scouts may be requested only in territory or discovery")
+                scouting.update(
+                    {
+                        "round": int(scouting.get("round", 0)) + 1,
+                        "requested_at": utc_now(),
+                        "active_role": None,
+                        "reports": {},
+                    }
+                )
+                add_history(state, "opportunity_scouts_requested", round=scouting["round"])
+            elif evaluator == "opportunity_scout_running":
+                role = scouting.get("active_role")
+                report = scouting.get("reports", {}).get(role)
+                if not report:
+                    raise CampaignError("opportunity scout must record its assigned report before handoff")
+                scouting["active_role"] = None
+            else:
+                raise CampaignError("only the research director or an active scout may use this handoff")
+        if args.state == "needs_evidence_analysis":
+            if evaluator not in {"agent_running", "waiting_pbs", "needs_agent"}:
+                raise CampaignError("evidence analysis may be requested only by the director or PBS transition")
+            pending_analysis = pending_independent_analysis_ids(state)
+            if not pending_analysis:
+                raise CampaignError("no terminal experiment requires independent analysis")
+            state["control"]["analysis_experiment_id"] = pending_analysis[0]
         if (
             args.state == "needs_agent"
             and learning_enabled(state)
@@ -5399,6 +6493,17 @@ def cmd_handoff(args: argparse.Namespace) -> None:
             if not finding_id:
                 raise CampaignError("failure reviewer has no pending finding")
             learning_failure_review_by_finding(state, finding_id)
+        if args.state == "needs_agent" and evaluator == "evidence_analyst_running":
+            experiment_id = state["control"].get("analysis_experiment_id")
+            analysis = independent_analysis_entries(state).get(experiment_id)
+            if not analysis:
+                raise CampaignError("evidence analyst must record an analysis before handoff")
+        if (
+            args.state == "needs_agent"
+            and pending_independent_analysis_ids(state)
+            and evaluator != "evidence_analyst_running"
+        ):
+            raise CampaignError("handoff to needs_evidence_analysis before author interpretation")
         if (
             args.state == "needs_agent"
             and state["phase"] == "novelty_review"
@@ -5445,7 +6550,16 @@ def cmd_resume(args: argparse.Namespace) -> None:
             raise CampaignError(f"campaign cannot resume from status {state['status']}")
         previous = state["status"]
         state["status"] = "active"
-        state["control"].update({"state": "needs_agent", "reason": args.reason, "wake_at": None})
+        ensure_research_os(state)
+        next_state = "needs_evidence_analysis" if pending_independent_analysis_ids(state) else "needs_agent"
+        state["control"].update(
+            {
+                "state": next_state,
+                "reason": args.reason,
+                "wake_at": None,
+                "lease": None,
+            }
+        )
         add_history(state, "campaign_resumed", previous=previous, reason=args.reason)
         print(json.dumps(state["control"], indent=2))
 
@@ -5482,6 +6596,11 @@ def add_common_init(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-batch-walltime", default="24:00:00")
     parser.add_argument("--max-files", type=int, default=512)
     parser.add_argument("--max-agent-turns", type=int, default=40)
+    parser.add_argument(
+        "--research-mode",
+        choices=tuple(sorted(research_operating_model.RESEARCH_MODES)),
+        default="balanced",
+    )
     parser.add_argument("--deadline", required=True)
     parser.add_argument("--environment")
     parser.add_argument("--data", action="append", default=[])
@@ -5527,6 +6646,11 @@ def build_parser() -> argparse.ArgumentParser:
     skill_adopt.add_argument("root")
     skill_adopt.add_argument("--by", required=True)
     skill_adopt.add_argument("--reason", required=True)
+    skill_adopt.add_argument(
+        "--rotate-author",
+        action="store_true",
+        help="start the adopted operating model in a fresh Director thread",
+    )
     skill_adopt.set_defaults(func=cmd_skill_adopt)
 
     status = sub.add_parser("status", help="show phase, approval, jobs, artifacts, and remaining budgets")
@@ -5542,6 +6666,48 @@ def build_parser() -> argparse.ArgumentParser:
     learning_init.add_argument("--adopt-current-claim", action="store_true")
     learning_init.add_argument("--reason", required=True)
     learning_init.set_defaults(func=cmd_learning_init)
+
+    concept_freeze = sub.add_parser(
+        "concept-freeze",
+        help="freeze a scoped hypothesis after a preliminary nearest-prior check",
+    )
+    concept_freeze.add_argument("root")
+    concept_freeze.add_argument("--hypothesis-id", required=True)
+    concept_freeze.add_argument("--file", required=True)
+    concept_freeze.add_argument("--reason", required=True)
+    concept_freeze.set_defaults(func=cmd_concept_freeze)
+
+    protocol_record = sub.add_parser(
+        "protocol-record",
+        help="record a bounded evaluation/data protocol revision without mutating the hypothesis",
+    )
+    protocol_record.add_argument("root")
+    protocol_record.add_argument("--file", required=True)
+    protocol_record.set_defaults(func=cmd_protocol_record)
+
+    director_decision = sub.add_parser(
+        "director-decision",
+        help="record the research director's bounded portfolio or promotion decision",
+    )
+    director_decision.add_argument("root")
+    director_decision.add_argument("--file", required=True)
+    director_decision.set_defaults(func=cmd_director_decision)
+
+    scout_record = sub.add_parser(
+        "scout-record",
+        help="record one controller-assigned blind opportunity scout report",
+    )
+    scout_record.add_argument("root")
+    scout_record.add_argument("--file", required=True)
+    scout_record.set_defaults(func=cmd_scout_record)
+
+    analysis_record = sub.add_parser(
+        "analysis-record",
+        help="record a blind raw-result analysis before author interpretation",
+    )
+    analysis_record.add_argument("root")
+    analysis_record.add_argument("--file", required=True)
+    analysis_record.set_defaults(func=cmd_analysis_record)
 
     learning_reseed = sub.add_parser(
         "learning-reseed",
@@ -5629,6 +6795,7 @@ def build_parser() -> argparse.ArgumentParser:
             "discovery",
             "sanity",
             "profile",
+            "scout",
             NOVELTY_PROBE_STAGE,
             "pilot",
             "baseline",
@@ -5651,6 +6818,23 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--expected-files", type=int, required=True)
     experiment.add_argument("--success-file", required=True)
     experiment.add_argument("--depends-on", action="append", default=[])
+    experiment.add_argument(
+        "--cell-id",
+        help="stable scientific question shared by technical repair attempts",
+    )
+    experiment.add_argument("--decision-question")
+    experiment.add_argument("--decision-if-supports")
+    experiment.add_argument("--decision-if-falsifies")
+    experiment.add_argument(
+        "--maturity",
+        choices=research_operating_model.MATURITY_LEVELS,
+    )
+    experiment.add_argument("--core-mechanism-test", action="store_true")
+    experiment.add_argument("--protocol-revision", type=int)
+    experiment.add_argument("--compatible-queue", action="append", default=[])
+    experiment.add_argument("--fallback-queue")
+    experiment.add_argument("--queue-observed-at")
+    experiment.add_argument("--resource-rationale")
     experiment.add_argument(
         "--debug-for",
         help="failed GPU batch repaired by this reusable interactive diagnostic",
@@ -5731,6 +6915,8 @@ def build_parser() -> argparse.ArgumentParser:
             "needs_novelty_review",
             "needs_novelty_arbitration",
             "needs_failure_review",
+            "needs_opportunity_scouts",
+            "needs_evidence_analysis",
             "waiting_pbs",
             "waiting_human",
             "waiting_time",

@@ -56,14 +56,14 @@ commands rather than relying on the global Codex configuration:
 
 ```bash
 bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN \
-  --model gpt-5.6-sol --reasoning-effort ultra
+  --model gpt-5.6-sol --reasoning-effort max
 bash "$STARTER" --root "$ROOT" --session aris-CAMPAIGN \
-  --model gpt-5.6-sol --reasoning-effort ultra --start
+  --model gpt-5.6-sol --reasoning-effort max --start
 ```
 
 Keep an exact launcher in the campaign root for failure recovery. The controller forwards the
-pinned settings to the long-lived author thread and to fresh novelty-review, arbitration, and
-failure-critic threads.
+pinned settings to the long-lived Director thread and to fresh opportunity-scout, raw-result
+analyst, novelty-review, arbitration, and failure-critic threads.
 
 The starter invokes the existing modern control-plane Python explicitly, removes stale PBS/jobfs/cache and ambient model/publishing token variables, and launches a no-profile shell. It never edits HOME startup files. Before creating tmux it runs a real ephemeral Codex canary that must use `apply_patch` to create and verify an exact marker in `/tmp`. A failed canary aborts startup.
 

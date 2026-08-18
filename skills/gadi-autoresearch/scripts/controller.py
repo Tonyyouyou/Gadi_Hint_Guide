@@ -27,6 +27,7 @@ NOVELTY_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "novelt
 ADAPTER_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "adapter-system.md"
 WORKFLOW_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "research-workflow.md"
 HARDWARE_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "hardware-routing.md"
+LAB_REFERENCE = Path(__file__).resolve().parents[1] / "references" / "lab-operating-model.md"
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 RETRY_DELAYS_SECONDS = (60, 300, 900, 3600)
 RUNNING_STATES = {
@@ -34,6 +35,8 @@ RUNNING_STATES = {
     "novelty_reviewer_running": ("novelty_reviewer", "needs_novelty_review"),
     "novelty_arbiter_running": ("novelty_arbiter", "needs_novelty_arbitration"),
     "failure_reviewer_running": ("failure_reviewer", "needs_failure_review"),
+    "opportunity_scout_running": ("opportunity_scout", "needs_opportunity_scouts"),
+    "evidence_analyst_running": ("evidence_analyst", "needs_evidence_analysis"),
 }
 
 
@@ -98,7 +101,11 @@ def ensure_control_schema(root: Path) -> None:
         state["control"].setdefault("recovery", recovery_defaults())
         state["control"].setdefault("failure_review_thread_id", None)
         state["control"].setdefault("failure_review_requested_at", None)
+        state["control"].setdefault("opportunity_scout_thread_ids", {})
+        state["control"].setdefault("analysis_thread_id", None)
+        state["control"].setdefault("analysis_experiment_id", None)
         state.setdefault("learning", None)
+        campaign.ensure_research_os(state)
 
 
 def clear_recovery(state: dict[str, Any]) -> None:
@@ -319,6 +326,57 @@ def refresh_pbs(root: Path) -> None:
     )
 
 
+def maybe_repack_workspace(root: Path, state: dict[str, Any]) -> None:
+    if any(
+        attempt.get("status") in campaign.JOB_ACTIVE
+        for experiment in state["experiments"].values()
+        for attempt in experiment.get("attempts", [])
+    ):
+        return
+    workspace = campaign.canonical(state["workspace"], strict=True)
+    try:
+        info = campaign.git_workspace_info(workspace, require_clean=True)
+        count = subprocess.run(
+            ["git", "-C", str(workspace), "count-objects", "-v"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        loose = next(
+            (
+                int(line.split(":", 1)[1].strip())
+                for line in count.stdout.splitlines()
+                if line.startswith("count:")
+            ),
+            0,
+        )
+        if count.returncode != 0 or loose < 256:
+            return
+        repack = subprocess.run(
+            ["git", "-C", str(workspace), "repack", "-ad", "-q"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if repack.returncode != 0:
+            return
+        subprocess.run(
+            ["git", "-C", str(workspace), "prune-packed", "-q"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        with campaign.locked_state(root) as updated:
+            campaign.add_history(
+                updated,
+                "workspace_git_repacked",
+                commit=info["commit"],
+                loose_objects_before=loose,
+            )
+    except (campaign.CampaignError, OSError, ValueError):
+        return
+
+
 def agent_prompt(root: Path, state: dict[str, Any]) -> str:
     route = state.get("route", {})
     route_references = route.get("references") or ["references/adapter-system.md"]
@@ -339,19 +397,51 @@ def agent_prompt(root: Path, state: dict[str, Any]) -> str:
         indent=2,
         sort_keys=True,
     )
+    research_packet = json.dumps(
+        {
+            "research_os": state.get("research_os"),
+            "health": campaign.research_health(state),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    research_mode = (state.get("research_os") or {}).get("mode", "balanced")
+    mode_guidance = {
+        "signal_first": (
+            "Optimize time-to-first-core-signal: keep scouts minimal, kill quickly, and do not "
+            "start paper-facing audits before one branch earns pilot maturity."
+        ),
+        "balanced": (
+            "Balance opportunity search with rigor: keep one primary branch and bounded backups, "
+            "then scale evidence only after each maturity promotion."
+        ),
+        "submission": (
+            "Consolidate an existing claim: prioritize frozen-protocol replication, robustness, "
+            "claim/citation audits, and paper completion; open a new territory only if the claim fails."
+        ),
+    }[research_mode]
     return f"""Use $gadi-autoresearch and resume the approved campaign at {root}.
-Read MISSION.json, campaign.json, {ADAPTER_REFERENCE}, {WORKFLOW_REFERENCE}, and the research workspace directly. The mission is immutable and defines which final contribution classes are acceptable. Continue the evidence-led discovery-to-paper workflow within the recorded project, SU, GPU, walltime, deadline, and persistent-file envelope. Use campaign.py for route selection, experiment registration, previews, submissions, refreshes, artifacts, phases, and handoffs. Never call raw qsub/qdel, never compute on the login or persistent-session host, and never write workload data under .codex.
+Act as the Research Director and sole workspace writer. Read MISSION.json, campaign.json, {LAB_REFERENCE}, {ADAPTER_REFERENCE}, {WORKFLOW_REFERENCE}, and the research workspace directly. The mission is immutable and defines which final contribution classes are acceptable. Continue the evidence-led discovery-to-paper workflow within the recorded project, SU, GPU, walltime, deadline, and persistent-file envelope. Use campaign.py for every state change and Gadi action. Never call raw qsub/qdel, never compute on the login or persistent-session host, and never write workload data under .codex.
 
 Current adapter packet:
 {reference_packet}
 
-During territory and discovery, map task/model/lever/evidence opportunities, run only bounded observation probes, and resolve an explicit dependency-complete route with campaign.py route-set before portfolio. Inspect every selected adapter's required evidence, discovery questions, novelty traps, and linked references. Treat human_evaluation=conditional as a claim-dependent decision: any perceived-quality or preference claim must select the required perceptual/human evidence route before leaving discovery. Write one compact DISCOVERY_REPORT.md and a machine-readable CANDIDATE_PORTFOLIO.json with the mission-required number of viable candidates. Each candidate needs an observation, causal hypothesis, mechanism, predicted signature, falsifier, cheap distinguishing test, nearest-work delta, and estimated SU/job/file cost. Do not promote a branded idea without an observed or formally defined problem.
+Current research-director packet:
+{research_packet}
 
-After recording the candidate portfolio, initialize the two-file hypothesis-evolution workflow with campaign.py learning-init. Read RESEARCH_GRAPH.json and LEARNING_LEDGER.jsonl on every turn. Freeze one active hypothesis with claim-freeze before novelty review. Register every scientific experiment with an explicit evidence role and hypothesis id. Exploratory and diagnostic work may discover a better question; confirmatory and replication work may support a frozen paper claim. Never relabel exploratory evidence as confirmation after seeing it.
+Current research mode `{research_mode}`: {mode_guidance}
 
-Every terminal scientific experiment must receive exactly one structured interpretation through campaign.py learning-record before adaptive work continues. Separate technical invalidity from scientific falsification. Technical failures use repair and do not mutate the scientific hypothesis. Valid falsification, qualification, surprise, or a proposed refine/branch/pivot/stop must hand off to needs_failure_review. The controller then launches a fresh critic. Only an independently attested review may authorize hypothesis-fork or a portfolio pivot. A child hypothesis must cite the generating finding, while that generating experiment remains evidence about its parent and is never confirmation for the child. Keep at most three active branches; prune on evidence, not taste. Freeze a materially changed claim and repeat novelty review before confirmatory experiments.
+Treat the campaign as a portfolio, not a linear review pipeline. The operative loop is question -> cheapest discriminating test -> raw result -> blind independent analysis -> director decision. Keep scientific hypotheses, data/evaluation protocol revisions, and infrastructure repairs in separate lanes. Every experiment must answer one decision-changing question. Optimize time-to-kill during seed/scout, increase rigor only at pilot/claim/paper, and obey every research-health alert without pausing merely because the science is uncertain.
 
-Before planning or claim-bearing experiments, read {NOVELTY_REFERENCE} and satisfy the machine-enforced novelty gate. Bind the audit to the mission, route, candidate portfolio, and idea report. Describe the active candidate as mechanism primitives without its coined name, search exact/synonym/task/adjacent/combination/code/citation-neighbor routes, compare at least three checked primary sources, and write the bound IDEA_REPORT and NOVELTY_AUDIT.json artifacts. Never write or register NOVELTY_REVIEW.json from the author thread: enter novelty_review and hand off with state needs_novelty_review so the controller launches a fresh adversarial reviewer. A legacy derivative/rejected review is not automatically upgraded under this skill revision: either refine/replace the candidate or produce a fresh bound audit and request a fresh review.
+During territory and discovery, request `needs_opportunity_scouts` once per materially new territory. The controller will launch blind literature, systems, and cross-domain scouts in fresh contexts; do not imitate their independence in your own thread. Synthesize their attested reports into one compact DISCOVERY_REPORT.md and CANDIDATE_PORTFOLIO.json. Resolve an explicit dependency-complete route with campaign.py route-set before portfolio. Each candidate needs an observation, causal hypothesis, mechanism, predicted signature, falsifier, cheap distinguishing test, nearest-work delta, and estimated SU/job/file cost. Do not promote a branded idea without an observed or formally defined problem.
+
+After recording the portfolio, initialize the two-file hypothesis workflow with campaign.py learning-init. Read the compact graph, ledger, and research_os decision packet on every turn. Perform a preliminary nearest-prior check, then use concept-freeze; this authorizes real-path scout work without pretending the paper claim is fixed. Register scout/pilot experiments with a stable `--cell-id`, explicit decision question and support/falsify decisions, maturity, protocol revision, compatible queues, and `--core-mechanism-test` when it directly exercises the proposed mechanism. Technical repairs remain attempts in the same scientific cell. Do not use claim-freeze or exhaustive novelty review until a director decision has promoted an empirically supported branch to claim maturity. Never relabel exploratory evidence as confirmation after seeing it.
+
+After every completed evidence-bearing scientific batch, the controller launches a fresh analyst who sees raw output before your interpretation. Failed, cancelled, diagnostic, and interactive attempts return directly to you for infrastructure interpretation and do not spend a blind-analysis turn. Read each required attested analysis, then record exactly one learning interpretation with explicit `lane`, `materiality`, and `decision_scope`. Technical invalidity uses lane=infrastructure and repair. Data/evaluation changes use lane=protocol with protocol_refine or narrow_scope, then protocol-record; they do not mutate the scientific graph and do not summon a mechanism critic. Nonmaterial qualification plus continue does not require review. Only material scientific falsification or mutation requests use needs_failure_review. The critic classifies severity and may request at most one bounded test; after two reviews in one chain, the controller requires your director-decision rather than another critic. Record a bounded director-decision before refine/branch/pivot/park/kill or promotion. Its next_budget is enforced for jobs, SU, and Director turns. A generating finding remains evidence about its parent and never confirms its child.
+
+Use seed -> scout -> pilot -> claim -> paper maturity. Promote at most one level per director decision and attach a jobs/SU/turns/protocol-diagnostic budget. A scout needs a minimal integrated real-model witness. A pilot needs a competitive baseline and discriminating ablation. After promotion to claim, freeze the confirmatory protocol, call claim-freeze to bind the scientific object, refresh exhaustive novelty against that frozen object, obtain the cold review, and only then run confirmatory evidence. Data uncertainty blocks only affected consumed endpoints and claims: actual leakage, invalid metrics, safety, and authorization are hard blockers; untested excluded relations are warnings or scope ceilings. If a relation has no positive real evidence, declare it out of scope instead of manufacturing an endless gate.
+
+At claim promotion, read {NOVELTY_REFERENCE} and satisfy the exhaustive machine-enforced novelty gate. Bind the audit to the mission, route, candidate portfolio, idea report, and frozen scientific claim. Describe the mechanism without its coined name, search exact/synonym/task/adjacent/combination/code/citation-neighbor routes, compare checked primary sources, and request a fresh reviewer. Preliminary novelty is triage only; exhaustive novelty is required before confirmatory work and refreshed before submission.
 
 The cold reviewer has three current outcomes. clear_to_plan opens planning. exact_prior_reject requires a checked functionally equivalent prior and sends the candidate back to discovery/portfolio. conditional_probe means no exact prior was found but the paper-facing delta depends on an empirical interaction. In that case, remain in novelty_review and run only stage=novelty_probe experiments bound to the review. Current hard caps are:
 {novelty_probe_packet}
@@ -363,9 +453,9 @@ Before every GPU registration or queue-driven replacement, read {HARDWARE_REFERE
 
 If a candidate requires unavailable human evaluation, block only that candidate: generate a packed blinded study bundle when the mission permits it, then promote an objective-evidence backup or return to discovery. Hand off to waiting_human only when the immutable mission explicitly requires human evidence and no acceptable autonomous branch remains. Never invent ratings, listeners, consent, demographics, or human-study results. Keep all expanded audio/media samples in PBS jobfs and publish only bounded archives, manifests, aggregate metrics, and a small declared demo subset.
 
-Recover technical failures autonomously, but never use repeated GPU batch submissions as an edit-run loop. Before an unproven model/CUDA path, prefer one bounded interactive diagnostic. After one technical GPU batch failure in the same cell, do not submit another GPU batch repair: register a one-GPU, at-most-four-hour interactive diagnostic on the intended successor queue with `--debug-for FAILED_ID`, start its named tmux allocation through campaign.py, and reuse the same allocation across clean source commits. A nonzero `interactive-run` returns to the PBS shell; inspect the compact failure, edit and commit on the control-side workspace, then run `interactive-run` again. Do not exit the PBS shell or call `interactive-close` merely because the workload failed. Failed staging is reset only inside PBS_JOBFS on the next run. When the smallest real witness succeeds, publish the compact receipt, exit and close the allocation, record its diagnostic interpretation, then register the batch successor at the receipt's exact source commit. The CLI enforces this lineage. A valid scientific gate, falsification, or qualification is not a technical failure. Release an interactive GPU when blocked on literature, data acquisition, a long redesign, or any external wait.
+Recover technical failures autonomously, but never use repeated CPU or GPU batch submissions as an edit-run loop. Before an unproven model/CUDA/parser path, prefer one bounded interactive diagnostic. After one technical batch failure in the same cell, register a same-queue interactive diagnostic with `--debug-for FAILED_ID` and the failed batch's same `--cell-id`; reuse that allocation across clean source commits until the smallest real witness succeeds. A nonzero `interactive-run` returns to the PBS shell. Keep environments, packed datasets, and packed models cached persistently only at their approved roots; stage them into the same PBS jobfs allocation once. Release the allocation only for literature, acquisition, redesign, or external waiting. Use stable source filenames across repairs because Git already preserves versions; do not create v1/v2/v3 source copies. Keep the canonical workspace clean and let the controller repack loose Git objects at safe idle points.
 
-For CPU, storage, or non-reproducible long-job failures, inspect compact logs and change the script or source commit before an appropriate bounded retry. Use campaign.py cancel --execute only for a recorded campaign job when allow_auto_cancel is granted. Novelty uncertainty, an incompatible open model, a failed environment build, or a rejected candidate is not a reason for waiting_human. Work until PBS work must be awaited, a scheduled wake is appropriate, a true authorization/integrity boundary is reached, or every completion artifact is verified. Before this Codex turn exits, call campaign.py handoff with the correct state and concrete reason. A missing handoff is automatically retried by the supervisor."""
+For queue routing, select the smallest compatible resource and normally prefer one V100/A100 for portable scout/debug work; use H200 only for measured capacity, Hopper-specific behavior, or matched final evidence. Bundle sweeps. Never sit in an agent turn waiting for PBS: submit, hand off, and let the event-driven controller wake later. Before paper completion, build a claim graph linking every claim to evidence, code commit, protocol revision, primary literature, assumptions, and limitations; independently reproduce the central result, then write and compile LaTeX. Before this turn exits, call campaign.py handoff with the correct state and concrete reason. A missing handoff is automatically retried."""
 
 
 def novelty_reviewer_prompt(root: Path, audit: dict[str, Any]) -> str:
@@ -444,14 +534,83 @@ def failure_reviewer_prompt(
         indent=2,
         sort_keys=True,
     )
-    return f"""Use $gadi-autoresearch as the fresh failure critic for {root}.
+    maturity = experiment.get("maturity") or "scout"
+    review_kind = "integrity" if maturity in {"claim", "paper"} else "mechanism"
+    return f"""Use $gadi-autoresearch as the fresh {review_kind} critic for {root}.
 You are not the author. Do not edit the source workspace, mutate hypotheses, change phases or approval, register experiments, submit PBS work, or browse for a new idea. Read campaign.json and {WORKFLOW_REFERENCE}. First inspect the registered experiment, raw compact result or success marker, attempt metadata, and any bounded logs without reading the author's interpretation line in LEARNING_LEDGER.jsonl. Form an independent validity and causal assessment from this blind packet:
 
 {blind_packet}
 
-Only after fixing that preliminary assessment, read the interpretation for finding {finding_id}. Decide accept, revise, or reject. Distinguish implementation failure, assumption failure, mechanism failure, scope qualification, ceiling effect, anomaly, and inconclusive evidence. Authorize refine, branch, or pivot only when the result is scientifically valid, alternative explanations are addressed, and the change is material. A technical failure should authorize repair without a scientific update. Do not let the evidence that generated a child hypothesis count as confirmation for that child.
+Only after fixing that preliminary assessment, read the interpretation for finding {finding_id}. Decide accept, revise, or reject. Set review_kind={review_kind}. Classify the objection as hard_invalidating, claim_scope, future_work, or nonblocking. State the affected claim, the decision the objection changes, and an estimated cost in jobs, hours, SU, and persistent entries. You may require at most one bounded next test; it must distinguish a named alternative explanation and change a concrete decision. Do not apply submission-grade requirements to scout evidence. Authorize scientific mutation only when the result is valid and material. Protocol scope changes are not child hypotheses. A technical failure authorizes repair without a scientific update, and generating evidence never confirms its child.
 
 Write one temporary JSON object matching the failure_review schema in {WORKFLOW_REFERENCE}, call campaign.py learning-review --file on it, remove the temporary file, and hand off to needs_agent with a concrete assessment. The controller will reject a reused author thread, changed source workspace, changed interpretation, incomplete schema, or missing handoff."""
+
+
+def opportunity_scout_prompt(root: Path, state: dict[str, Any], role: str, round_number: int) -> str:
+    packet = json.dumps(
+        {
+            "round": round_number,
+            "role": role,
+            "mission": state["mission"],
+            "route": state.get("route"),
+            "workspace": state["workspace"],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    role_focus = {
+        "literature": "Search primary literature and official code for open contradictions, missing comparisons, and mechanism gaps.",
+        "systems": "Inspect the research workspace read-only and identify measured or measurable model/runtime/data bottlenecks.",
+        "cross_domain": "Search adjacent fields for mechanisms with a non-obvious, falsifiable transfer to this mission.",
+    }[role]
+    return f"""Use $gadi-autoresearch as a blind {role} opportunity scout for {root}.
+This is a fresh context. You are not the Research Director, cannot edit the workspace, cannot read other scout reports, and cannot register or submit experiments. {role_focus}
+
+Assignment packet:
+{packet}
+
+Read {LAB_REFERENCE} and only the mission, selected adapter references, primary sources, and read-only workspace material needed for your role. Produce 1-5 causal opportunities, not branded paper pitches. Each needs an observation, a causal opportunity, the cheapest differentiating test, nearest-work delta, closest-prior queries, and estimated jobs/SU/hours. Write one temporary JSON object matching the opportunity_scout schema in {LAB_REFERENCE}, call campaign.py scout-record --file on it, remove the temporary file, and hand off to needs_opportunity_scouts. Do not read campaign.json after launch because it can contain earlier blind reports."""
+
+
+def evidence_analyst_prompt(
+    root: Path,
+    experiment: dict[str, Any],
+    hypothesis: dict[str, Any],
+) -> str:
+    packet = json.dumps(
+        {
+            "experiment": {
+                "id": experiment["id"],
+                "scientific_cell_id": experiment.get("scientific_cell_id"),
+                "stage": experiment["stage"],
+                "maturity": experiment.get("maturity"),
+                "evidence_role": experiment.get("evidence_role"),
+                "decision_question": experiment.get("decision_question"),
+                "decision_if_supports": experiment.get("decision_if_supports"),
+                "decision_if_falsifies": experiment.get("decision_if_falsifies"),
+                "protocol_revision": experiment.get("protocol_revision"),
+                "command": experiment["command"],
+                "success_file": experiment.get("success_file"),
+                "attempts": experiment.get("attempts", []),
+            },
+            "hypothesis": {
+                "id": hypothesis["id"],
+                "causal_hypothesis": hypothesis["causal_hypothesis"],
+                "predictions": hypothesis["predictions"],
+                "falsifiers": hypothesis["falsifiers"],
+                "assumptions": hypothesis["assumptions"],
+            },
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    return f"""Use $gadi-autoresearch as the blind raw-result analyst for {root}.
+You are a fresh independent context. Do not edit the workspace, browse for a new idea, mutate state outside analysis-record, or read LEARNING_LEDGER.jsonl, author narratives, reviewer reports, or director decisions before fixing your assessment.
+
+Blind evidence packet:
+{packet}
+
+Inspect the registered raw compact output/success marker and bounded PBS attempt metadata. Decide validity, likely outcome, recommended scientific/protocol/infrastructure lane, causal assessment, alternative explanations, threats, and what decision the result can actually change. Respect the evidence maturity: a scout can reveal a signal without confirming a paper claim. Write one temporary JSON object matching the independent_analysis schema in {LAB_REFERENCE}, call campaign.py analysis-record --file, remove the temporary file, and hand off to needs_agent. Do not prescribe an unlimited audit chain."""
 
 
 def codex_prefix(
@@ -556,6 +715,102 @@ def failure_reviewer_codex_command(
         str(workspace),
         failure_reviewer_prompt(root, finding_id, hypothesis, experiment),
     ]
+
+
+def opportunity_scout_codex_command(
+    codex_bin: str,
+    workspace: Path,
+    root: Path,
+    state: dict[str, Any],
+    role: str,
+    round_number: int,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> list[str]:
+    return [
+        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+        "--add-dir",
+        str(root),
+        "--json",
+        "-C",
+        str(workspace),
+        opportunity_scout_prompt(root, state, role, round_number),
+    ]
+
+
+def evidence_analyst_codex_command(
+    codex_bin: str,
+    workspace: Path,
+    root: Path,
+    experiment: dict[str, Any],
+    hypothesis: dict[str, Any],
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> list[str]:
+    return [
+        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+        "--add-dir",
+        str(root),
+        "--json",
+        "-C",
+        str(workspace),
+        evidence_analyst_prompt(root, experiment, hypothesis),
+    ]
+
+
+def execute_fresh_codex(
+    command: list[str],
+    *,
+    workspace: Path,
+    root: Path,
+    role: str,
+    target_state: str,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> tuple[int, str | None]:
+    log_path = root / "controller.log"
+    rotate_log(log_path)
+    discovered_thread = None
+    returncode = 1
+    log = log_path.open("a", encoding="utf-8")
+    try:
+        log.write(
+            f"\n[{campaign.utc_now()}] launch {role}: "
+            f"model={model or 'config default'} "
+            f"reasoning_effort={reasoning_effort or 'config default'}\n"
+        )
+        log.flush()
+        process = subprocess.Popen(
+            command,
+            cwd=workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        record_lease(root, role, target_state, process.pid)
+        assert process.stdout is not None
+        for line in process.stdout:
+            log.write(line)
+            if log.tell() >= MAX_LOG_BYTES:
+                log.flush()
+                log.close()
+                rotate_log(log_path)
+                log = log_path.open("a", encoding="utf-8")
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "thread.started":
+                candidate = nested_thread_id(event)
+                if candidate:
+                    discovered_thread = candidate
+        process.stdout.close()
+        returncode = process.wait()
+        log.write(f"[{campaign.utc_now()}] {role} exit: {returncode}\n")
+    finally:
+        log.close()
+    return returncode, discovered_thread
 
 
 def run_codex_canary(
@@ -1675,6 +1930,20 @@ def run_failure_reviewer(
                 "attested_at": campaign.utc_now(),
             }
             updated["learning"]["pending_failure_review"] = None
+            lab = campaign.ensure_research_os(updated)
+            chain = lab["review_chain"]
+            if chain.get("hypothesis_id") != interpretation["hypothesis_id"]:
+                chain.update(
+                    {
+                        "hypothesis_id": interpretation["hypothesis_id"],
+                        "count": 0,
+                        "finding_ids": [],
+                    }
+                )
+            chain["count"] = int(chain.get("count", 0)) + 1
+            if finding_id not in chain["finding_ids"]:
+                chain["finding_ids"].append(finding_id)
+            lab["portfolio"]["director_decision_required"] = finding_id
             updated["control"]["failure_review_thread_id"] = discovered_thread
             updated["control"].update(
                 {
@@ -1707,6 +1976,395 @@ def run_failure_reviewer(
         )
 
 
+def run_opportunity_scout(
+    root: Path,
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    state = campaign.load_state(root)
+    campaign.require_approved(state, "allow_auto_agent")
+    campaign.require_current_skill(state)
+    if int(state["control"]["agent_turns"]) >= int(state["approval"]["max_agent_turns"]):
+        pause_campaign(root, "approved Codex turn budget exhausted during opportunity scouting")
+        return
+    lab = campaign.ensure_research_os(state)
+    scouting = lab["scouting"]
+    missing = [
+        role
+        for role in campaign.research_operating_model.SCOUT_ROLES
+        if role not in scouting.get("reports", {})
+    ]
+    if not missing:
+        set_control(root, state="needs_agent", reason="blind opportunity scout round is complete")
+        return
+    role = missing[0]
+    round_number = int(scouting["round"])
+    try:
+        campaign.live_preflight(state)
+        workspace = campaign.canonical(state["workspace"], strict=True)
+        campaign.validate_workspace(workspace)
+        workspace_commit = campaign.git_workspace_info(workspace, require_clean=True)["commit"]
+    except (campaign.CampaignError, OSError) as exc:
+        schedule_recovery(
+            root,
+            category="opportunity_scout_preflight",
+            role="opportunity_scout",
+            target_state="needs_opportunity_scouts",
+            reason=f"opportunity scout preflight failed: {exc}",
+        )
+        return
+    if not shutil.which(codex_bin):
+        schedule_recovery(
+            root,
+            category="codex_unavailable",
+            role="opportunity_scout",
+            target_state="needs_opportunity_scouts",
+            reason=f"Codex executable is unavailable: {codex_bin}",
+        )
+        return
+    forbidden_threads = {
+        value
+        for value in [
+            state["control"].get("thread_id"),
+            *state["control"].get("opportunity_scout_thread_ids", {}).values(),
+        ]
+        if value
+    }
+    with campaign.locked_state(root) as current:
+        if current["status"] != "active" or current["control"]["state"] != "needs_opportunity_scouts":
+            return
+        current_lab = campaign.ensure_research_os(current)
+        current_scouting = current_lab["scouting"]
+        if int(current_scouting["round"]) != round_number or role in current_scouting["reports"]:
+            current["control"].update(
+                {"state": "needs_opportunity_scouts", "reason": "scouting assignment changed before launch"}
+            )
+            return
+        current_scouting["active_role"] = role
+        current["control"].update(
+            {
+                "state": "opportunity_scout_running",
+                "reason": f"controller launched blind {role} opportunity scout",
+                "lease": {
+                    "role": "opportunity_scout",
+                    "target_state": "needs_opportunity_scouts",
+                    "pid": None,
+                    "host": socket.gethostname(),
+                    "started_at": campaign.utc_now(),
+                },
+            }
+        )
+        campaign.add_history(
+            current,
+            "controller_opportunity_scout_started",
+            role=role,
+            round=round_number,
+        )
+        launch_state = current
+    command = opportunity_scout_codex_command(
+        codex_bin,
+        workspace,
+        root,
+        launch_state,
+        role,
+        round_number,
+        model,
+        reasoning_effort,
+    )
+    try:
+        returncode, discovered_thread = execute_fresh_codex(
+            command,
+            workspace=workspace,
+            root=root,
+            role=f"opportunity_scout_{role}",
+            target_state="needs_opportunity_scouts",
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    except OSError as exc:
+        schedule_recovery(
+            root,
+            category="opportunity_scout_launch",
+            role="opportunity_scout",
+            target_state="needs_opportunity_scouts",
+            reason=f"failed to launch opportunity scout: {exc}",
+        )
+        return
+    recovery_request: tuple[str, str] | None = None
+    with campaign.locked_state(root) as updated:
+        updated["control"]["agent_turns"] += 1
+        updated["control"]["last_agent_at"] = campaign.utc_now()
+        updated["control"]["lease"] = None
+        failure = None
+        updated_lab = campaign.ensure_research_os(updated)
+        updated_scouting = updated_lab["scouting"]
+        report = updated_scouting.get("reports", {}).get(role)
+        if returncode != 0:
+            failure = f"opportunity scout exited with status {returncode}"
+        elif not discovered_thread:
+            failure = "opportunity scout returned no thread ID"
+        elif discovered_thread in forbidden_threads:
+            failure = "opportunity scout reused an author or earlier scout thread"
+        elif not report:
+            failure = "opportunity scout returned no structured report"
+        elif updated["control"]["state"] != "needs_opportunity_scouts":
+            failure = "opportunity scout exited without the required coordinator handoff"
+        else:
+            try:
+                if campaign.git_workspace_info(workspace, require_clean=True)["commit"] != workspace_commit:
+                    raise campaign.CampaignError("opportunity scout changed the source workspace")
+            except (campaign.CampaignError, OSError) as exc:
+                failure = str(exc)
+        if failure:
+            updated_scouting.get("reports", {}).pop(role, None)
+            updated_scouting["active_role"] = None
+            recovery_request = ("opportunity_scout_turn", failure)
+        else:
+            report.update(
+                {
+                    "independent": True,
+                    "thread_id": discovered_thread,
+                    "workspace_commit": workspace_commit,
+                    "attested_at": campaign.utc_now(),
+                }
+            )
+            updated["control"].setdefault("opportunity_scout_thread_ids", {})[role] = discovered_thread
+            updated_scouting["active_role"] = None
+            remaining = [
+                item
+                for item in campaign.research_operating_model.SCOUT_ROLES
+                if item not in updated_scouting["reports"]
+            ]
+            updated["control"].update(
+                {
+                    "state": "needs_opportunity_scouts" if remaining else "needs_agent",
+                    "reason": (
+                        f"continue blind scouting with {remaining[0]}"
+                        if remaining
+                        else "all blind opportunity scouts are attested; director must synthesize the portfolio"
+                    ),
+                }
+            )
+            clear_recovery(updated)
+        campaign.add_history(
+            updated,
+            "opportunity_scout_turn_finished",
+            role=role,
+            round=round_number,
+            returncode=returncode,
+            thread_id=discovered_thread,
+            validated=not failure,
+            failure=failure,
+        )
+    if recovery_request:
+        category, reason = recovery_request
+        schedule_recovery(
+            root,
+            category=category,
+            role="opportunity_scout",
+            target_state="needs_opportunity_scouts",
+            reason=reason,
+        )
+
+
+def run_evidence_analyst(
+    root: Path,
+    codex_bin: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    state = campaign.load_state(root)
+    campaign.require_approved(state, "allow_auto_agent")
+    campaign.require_current_skill(state)
+    pending = campaign.pending_independent_analysis_ids(state)
+    if not pending:
+        set_control(root, state="needs_agent", reason="no independent evidence analysis is pending")
+        return
+    if int(state["control"]["agent_turns"]) >= int(state["approval"]["max_agent_turns"]):
+        pause_campaign(root, "approved Codex turn budget exhausted before evidence analysis")
+        return
+    experiment_id = pending[0]
+    experiment = state["experiments"][experiment_id]
+    graph = campaign.load_research_graph(state)
+    hypothesis = campaign.hypothesis_by_id(graph, campaign.experiment_hypothesis_id(experiment))
+    experiment_sha256 = campaign.sha256_json(experiment)
+    result_sha256 = campaign.sha256_file(
+        campaign.canonical(experiment["success_file"], strict=True)
+    )
+    try:
+        campaign.live_preflight(state)
+        workspace = campaign.canonical(state["workspace"], strict=True)
+        campaign.validate_workspace(workspace)
+        workspace_commit = campaign.git_workspace_info(workspace, require_clean=True)["commit"]
+    except (campaign.CampaignError, OSError) as exc:
+        schedule_recovery(
+            root,
+            category="evidence_analysis_preflight",
+            role="evidence_analyst",
+            target_state="needs_evidence_analysis",
+            reason=f"evidence analyst preflight failed: {exc}",
+        )
+        return
+    if not shutil.which(codex_bin):
+        schedule_recovery(
+            root,
+            category="codex_unavailable",
+            role="evidence_analyst",
+            target_state="needs_evidence_analysis",
+            reason=f"Codex executable is unavailable: {codex_bin}",
+        )
+        return
+    author_thread = state["control"].get("thread_id")
+    with campaign.locked_state(root) as current:
+        if current["status"] != "active" or current["control"]["state"] not in {
+            "needs_evidence_analysis",
+            "needs_agent",
+        }:
+            return
+        if experiment_id not in campaign.pending_independent_analysis_ids(current):
+            current["control"].update(
+                {"state": "needs_agent", "reason": "analysis target changed before launch"}
+            )
+            return
+        current["control"].update(
+            {
+                "state": "evidence_analyst_running",
+                "reason": f"controller launched blind analyst for {experiment_id}",
+                "analysis_experiment_id": experiment_id,
+                "analysis_thread_id": None,
+                "lease": {
+                    "role": "evidence_analyst",
+                    "target_state": "needs_evidence_analysis",
+                    "pid": None,
+                    "host": socket.gethostname(),
+                    "started_at": campaign.utc_now(),
+                },
+            }
+        )
+        campaign.add_history(current, "controller_evidence_analyst_started", experiment_id=experiment_id)
+    command = evidence_analyst_codex_command(
+        codex_bin,
+        workspace,
+        root,
+        experiment,
+        hypothesis,
+        model,
+        reasoning_effort,
+    )
+    try:
+        returncode, discovered_thread = execute_fresh_codex(
+            command,
+            workspace=workspace,
+            root=root,
+            role="evidence_analyst",
+            target_state="needs_evidence_analysis",
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    except OSError as exc:
+        schedule_recovery(
+            root,
+            category="evidence_analysis_launch",
+            role="evidence_analyst",
+            target_state="needs_evidence_analysis",
+            reason=f"failed to launch evidence analyst: {exc}",
+        )
+        return
+    recovery_request: tuple[str, str] | None = None
+    with campaign.locked_state(root) as updated:
+        updated["control"]["agent_turns"] += 1
+        updated["control"]["last_agent_at"] = campaign.utc_now()
+        updated["control"]["lease"] = None
+        failure = None
+        analysis = campaign.independent_analysis_entries(updated).get(experiment_id)
+        if returncode != 0:
+            failure = f"evidence analyst exited with status {returncode}"
+        elif not discovered_thread:
+            failure = "evidence analyst returned no thread ID"
+        elif discovered_thread == author_thread:
+            failure = "evidence analyst reused the author thread"
+        elif not analysis:
+            failure = "evidence analyst returned no structured analysis"
+        elif updated["control"]["state"] != "needs_agent":
+            failure = "evidence analyst exited without the required author handoff"
+        else:
+            try:
+                current_experiment = updated["experiments"][experiment_id]
+                if campaign.sha256_json(current_experiment) != experiment_sha256:
+                    raise campaign.CampaignError("registered experiment changed during analysis")
+                if result_sha256 and campaign.sha256_file(
+                    campaign.canonical(current_experiment["success_file"], strict=True)
+                ) != result_sha256:
+                    raise campaign.CampaignError("experiment output changed during analysis")
+                if campaign.git_workspace_info(workspace, require_clean=True)["commit"] != workspace_commit:
+                    raise campaign.CampaignError("evidence analyst changed the source workspace")
+            except (campaign.CampaignError, OSError) as exc:
+                failure = str(exc)
+        if failure:
+            entries = [
+                entry
+                for entry in campaign.load_learning_ledger(updated)
+                if not (
+                    entry.get("entry_type") == "independent_analysis"
+                    and entry.get("experiment_id") == experiment_id
+                    and not entry.get("independent")
+                )
+            ]
+            campaign.rewrite_learning_ledger(updated, entries)
+            updated["control"].update(
+                {"analysis_experiment_id": None, "analysis_thread_id": None}
+            )
+            recovery_request = ("evidence_analysis_turn", failure)
+        else:
+            entries = campaign.load_learning_ledger(updated)
+            for entry in entries:
+                if entry.get("entry_type") == "independent_analysis" and entry.get(
+                    "experiment_id"
+                ) == experiment_id:
+                    entry.update(
+                        {
+                            "independent": True,
+                            "analyst_thread_id": discovered_thread,
+                            "workspace_commit": workspace_commit,
+                            "attested_at": campaign.utc_now(),
+                        }
+                    )
+            campaign.rewrite_learning_ledger(updated, entries)
+            updated["control"]["analysis_thread_id"] = discovered_thread
+            remaining = campaign.pending_independent_analysis_ids(updated)
+            updated["control"].update(
+                {
+                    "state": "needs_evidence_analysis" if remaining else "needs_agent",
+                    "analysis_experiment_id": remaining[0] if remaining else None,
+                    "reason": (
+                        f"blind analysis remains for {remaining[0]}"
+                        if remaining
+                        else f"blind analysis for {experiment_id} is attested; director must interpret it"
+                    ),
+                }
+            )
+            clear_recovery(updated)
+        campaign.add_history(
+            updated,
+            "evidence_analyst_turn_finished",
+            experiment_id=experiment_id,
+            returncode=returncode,
+            analyst_thread_id=discovered_thread,
+            validated=not failure,
+            failure=failure,
+        )
+    if recovery_request:
+        category, reason = recovery_request
+        schedule_recovery(
+            root,
+            category=category,
+            role="evidence_analyst",
+            target_state="needs_evidence_analysis",
+            reason=reason,
+        )
+
+
 def describe_action(state: dict[str, Any]) -> str:
     control = state["control"]["state"]
     if state["status"] != "active":
@@ -1719,6 +2377,10 @@ def describe_action(state: dict[str, Any]) -> str:
         return "launch one fresh independent novelty-arbitration thread"
     if control == "needs_failure_review":
         return "launch one fresh independent failure-critic thread"
+    if control == "needs_opportunity_scouts":
+        return "launch the next blind opportunity-scout thread"
+    if control == "needs_evidence_analysis":
+        return "launch one fresh blind raw-result analyst"
     if control == "waiting_pbs":
         return "refresh PBS no more than once every 600 seconds"
     if control == "waiting_time":
@@ -1764,6 +2426,16 @@ def tick(
         state = campaign.load_state(root)
         control = state["control"]["state"]
     if control == "needs_agent":
+        if campaign.pending_independent_analysis_ids(state):
+            set_control(
+                root,
+                state="needs_evidence_analysis",
+                reason="terminal evidence requires blind analysis before the director resumes",
+            )
+            state = campaign.load_state(root)
+            control = state["control"]["state"]
+    if control == "needs_agent":
+        maybe_repack_workspace(root, state)
         run_agent(root, codex_bin, model, reasoning_effort)
     elif control == "needs_novelty_review":
         run_novelty_reviewer(root, codex_bin, model, reasoning_effort)
@@ -1771,6 +2443,10 @@ def tick(
         run_novelty_arbiter(root, codex_bin, model, reasoning_effort)
     elif control == "needs_failure_review":
         run_failure_reviewer(root, codex_bin, model, reasoning_effort)
+    elif control == "needs_opportunity_scouts":
+        run_opportunity_scout(root, codex_bin, model, reasoning_effort)
+    elif control == "needs_evidence_analysis":
+        run_evidence_analyst(root, codex_bin, model, reasoning_effort)
     return campaign.load_state(root)["status"] == "active"
 
 

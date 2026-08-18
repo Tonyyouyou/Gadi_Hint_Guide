@@ -6,9 +6,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import research_operating_model
+
 
 GRAPH_SCHEMA_VERSION = 1
-LEDGER_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 2
 MAX_HYPOTHESES = 64
 MAX_ACTIVE_HYPOTHESES = 3
 SAFE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
@@ -23,8 +25,23 @@ OUTCOME_CLASSES = {
     "inconclusive",
     "not_scientific",
 }
-NEXT_ACTIONS = {"continue", "repair", "refine", "branch", "pivot", "stop", "confirm"}
+NEXT_ACTIONS = {
+    "continue",
+    "repair",
+    "refine",
+    "branch",
+    "pivot",
+    "stop",
+    "confirm",
+    "protocol_refine",
+    "narrow_scope",
+    "park",
+    "kill",
+    "investigate",
+}
 INFORMATION_GAIN = {"none", "low", "medium", "high"}
+MATERIALITY_CLASSES = {"nonmaterial", "branch_material", "claim_material"}
+DECISION_SCOPES = {"local", "branch", "portfolio", "claim"}
 ASSUMPTION_STATES = {"untested", "supported", "weakened", "falsified", "qualified"}
 HYPOTHESIS_STATES = {"active", "backup", "eliminated", "superseded"}
 HYPOTHESIS_RELATIONS = {"seed", "refinement", "branch"}
@@ -234,11 +251,16 @@ def seed_graph(
 
 
 def review_required(interpretation: dict[str, Any]) -> bool:
+    if interpretation.get("lane") != "scientific":
+        return False
+    if interpretation.get("materiality") == "nonmaterial":
+        return False
     return bool(
         interpretation["validity"] == "valid"
         and (
-            interpretation["outcome"] in {"falsifies", "qualifies", "unexpected"}
-            or interpretation["next_action"] in {"refine", "branch", "pivot", "stop"}
+            interpretation["outcome"] == "falsifies"
+            or interpretation["next_action"]
+            in {"refine", "branch", "pivot", "stop", "park", "kill"}
         )
     )
 
@@ -262,6 +284,13 @@ def validate_interpretation(payload: Any) -> dict[str, Any]:
         raise LearningError("interpretation.outcome is invalid")
     if action not in NEXT_ACTIONS:
         raise LearningError("interpretation.next_action is invalid")
+    lane = payload.get("lane")
+    if lane not in research_operating_model.LANES:
+        raise LearningError("interpretation.lane is invalid")
+    if payload.get("materiality") not in MATERIALITY_CLASSES:
+        raise LearningError("interpretation.materiality is invalid")
+    if payload.get("decision_scope") not in DECISION_SCOPES:
+        raise LearningError("interpretation.decision_scope is invalid")
     if validity != "valid" and outcome != "not_scientific":
         raise LearningError("invalid or contaminated work must use outcome=not_scientific")
     if validity != "valid" and action not in {"repair", "stop"}:
@@ -272,10 +301,27 @@ def validate_interpretation(payload: Any) -> dict[str, Any]:
         raise LearningError("valid scientific evidence cannot use next_action=repair")
     if validity != "valid" and action == "stop" and outcome != "not_scientific":
         raise LearningError("a technical stop must remain outcome=not_scientific")
-    if outcome == "falsifies" and action not in {"refine", "branch", "pivot", "stop"}:
-        raise LearningError("falsifying evidence must refine, branch, pivot, or stop")
+    if outcome == "falsifies" and action not in {"refine", "branch", "pivot", "stop", "park", "kill"}:
+        raise LearningError("falsifying evidence must refine, branch, pivot, park, kill, or stop")
     if action == "confirm" and (validity != "valid" or outcome != "supports"):
         raise LearningError("next_action=confirm requires valid supporting evidence")
+    if lane == "protocol" and action not in {"continue", "protocol_refine", "narrow_scope", "stop"}:
+        raise LearningError("protocol evidence may only continue, refine protocol, narrow scope, or stop")
+    if lane == "infrastructure" and action not in {"continue", "repair", "stop"}:
+        raise LearningError("infrastructure evidence may only continue, repair, or stop")
+    if action in {"protocol_refine", "narrow_scope"} and lane != "protocol":
+        raise LearningError(f"next_action={action} requires lane=protocol")
+    if action in {"refine", "branch", "pivot", "park", "kill", "confirm"} and lane != "scientific":
+        raise LearningError(f"next_action={action} requires lane=scientific")
+    if payload["materiality"] == "nonmaterial" and action in {
+        "refine",
+        "branch",
+        "pivot",
+        "park",
+        "kill",
+        "stop",
+    }:
+        raise LearningError("a nonmaterial interpretation cannot request a branch-level mutation")
     for key in ("expected", "observed", "surprise", "proposed_delta", "discriminating_test"):
         require_text(payload, key, "interpretation")
     require_text_list(payload, "alternative_explanations", "interpretation", allow_empty=outcome == "supports")
@@ -306,19 +352,44 @@ def validate_failure_review(payload: Any, interpretation: dict[str, Any]) -> dic
         raise LearningError("failure_review.decision is invalid")
     if payload.get("failure_class") not in FAILURE_CLASSES:
         raise LearningError("failure_review.failure_class is invalid")
+    if payload.get("review_kind") not in research_operating_model.REVIEW_KINDS:
+        raise LearningError("failure_review.review_kind is invalid")
+    if payload.get("objection_severity") not in research_operating_model.OBJECTION_SEVERITIES:
+        raise LearningError("failure_review.objection_severity is invalid")
     if payload.get("allowed_action") not in NEXT_ACTIONS:
         raise LearningError("failure_review.allowed_action is invalid")
     if not isinstance(payload.get("material_change"), bool):
         raise LearningError("failure_review.material_change must be boolean")
-    for key in ("validity_assessment", "rationale", "required_test"):
+    for key in (
+        "validity_assessment",
+        "rationale",
+        "affected_claim",
+        "decision_changed",
+        "required_test",
+    ):
         require_text(payload, key, "failure_review")
     require_text_list(payload, "alternative_explanations", "failure_review")
+    estimated_cost = payload.get("estimated_cost")
+    if not isinstance(estimated_cost, dict):
+        raise LearningError("failure_review.estimated_cost must be an object")
+    for key in ("jobs", "hours", "su", "persistent_entries"):
+        value = estimated_cost.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise LearningError(f"failure_review.estimated_cost.{key} must be non-negative")
     if payload["decision"] == "accept" and payload["allowed_action"] != interpretation["next_action"]:
         raise LearningError("an accepted review must preserve the proposed next action")
-    if payload["decision"] == "reject" and payload["allowed_action"] in {"refine", "branch", "pivot"}:
+    if payload["decision"] == "reject" and payload["allowed_action"] in {
+        "refine",
+        "branch",
+        "pivot",
+        "park",
+        "kill",
+    }:
         raise LearningError("a rejected interpretation cannot authorize a hypothesis mutation")
-    if payload["allowed_action"] in {"refine", "branch", "pivot"} and not payload["material_change"]:
+    if payload["allowed_action"] in {"refine", "branch", "pivot", "park", "kill"} and not payload["material_change"]:
         raise LearningError("hypothesis mutation must declare material_change=true")
+    if payload["objection_severity"] == "hard_invalidating" and payload["allowed_action"] == "confirm":
+        raise LearningError("a hard-invalidating objection cannot authorize confirmation")
     return payload
 
 

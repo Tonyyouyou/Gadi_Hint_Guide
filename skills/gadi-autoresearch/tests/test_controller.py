@@ -515,12 +515,15 @@ class ControllerTests(unittest.TestCase):
         interpretation.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": campaign.research_learning.LEDGER_SCHEMA_VERSION,
                     "finding_id": "surprising-diagnostic",
                     "experiment_id": "diagnostic-one",
                     "hypothesis_id": "candidate-one",
                     "evidence_role": "diagnostic",
                     "validity": "valid",
+                    "lane": "scientific",
+                    "materiality": "branch_material",
+                    "decision_scope": "branch",
                     "outcome": "unexpected",
                     "expected": "One stable latency regime.",
                     "observed": "Two reproducible latency regimes.",
@@ -565,16 +568,26 @@ class ControllerTests(unittest.TestCase):
         review.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": campaign.research_learning.LEDGER_SCHEMA_VERSION,
                     "finding_id": "surprising-diagnostic",
                     "decision": "accept",
                     "failure_class": "anomaly",
+                    "review_kind": "mechanism",
+                    "objection_severity": "claim_scope",
                     "allowed_action": "branch",
                     "material_change": True,
                     "validity_assessment": "The registered output supports a valid anomaly.",
                     "rationale": "The parent remains viable while a parallel mechanism is tested.",
+                    "affected_claim": "One controller regime explains every workload.",
+                    "decision_changed": "Permit one bounded parallel branch.",
                     "required_test": "Use an independent workload split.",
                     "alternative_explanations": ["A measurement regime could still explain the modes."],
+                    "estimated_cost": {
+                        "jobs": 1,
+                        "hours": 1,
+                        "su": 4,
+                        "persistent_entries": 2,
+                    },
                 },
                 indent=2,
             )
@@ -845,10 +858,10 @@ class ControllerTests(unittest.TestCase):
 
     def test_agent_prompt_requires_reusable_interactive_gpu_debugging(self) -> None:
         prompt = controller.agent_prompt(self.root, campaign.load_state(self.root))
-        self.assertIn("one technical GPU batch failure", prompt)
+        self.assertIn("one technical batch failure", prompt)
         self.assertIn("--debug-for", prompt)
-        self.assertIn("Do not exit the PBS shell", prompt)
-        self.assertIn("same allocation", prompt)
+        self.assertIn("returns to the PBS shell", prompt)
+        self.assertIn("reuse that allocation", prompt)
 
     def test_stale_agent_state_schedules_recovery(self) -> None:
         with campaign.locked_state(self.root) as state:
