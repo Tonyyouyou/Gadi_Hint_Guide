@@ -83,6 +83,13 @@ The controller holds `controller.lock`, reads `campaign.json`, and acts only on 
 | `paused` | supervisor remains idle and preserves the hard safety reason |
 | `complete` | exit |
 
+Every Codex role receives its prompt through standard input rather than as one command-line
+argument. This avoids the kernel's per-argument size limit as the campaign grows. The resumable
+Director launch packet is deliberately bounded: it contains current control indices, budgets,
+health, and hashes, while `campaign.json` remains authoritative for full scout reports, protocol
+history, novelty records, cells, and Director decisions. Do not restore full durable research
+history to the launch prompt or append a generated prompt directly to `codex exec`.
+
 Before launching Codex it verifies the pinned skill revision, reruns live
 project/inode/file-envelope preflight, and changes the state to `agent_running`,
 `novelty_reviewer_running`, `novelty_arbiter_running`, or `failure_reviewer_running`. Every launch records a host/PID/role lease and Codex must write a handoff. Transient preflight failures, nonzero exits, missing IDs/handoffs, PBS refresh errors, and stale leases schedule durable `waiting_time` recovery with 60, 300, 900, then 3,600 second delays. A repeatedly failing author thread is discarded after the fifth identical failure and reconstructed from `campaign.json`. Successful progress clears the failure counter.

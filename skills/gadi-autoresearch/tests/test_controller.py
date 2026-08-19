@@ -349,26 +349,33 @@ class ControllerTests(unittest.TestCase):
 
     def test_codex_command_uses_unattended_full_access_policy(self) -> None:
         state = campaign.load_state(self.root)
-        command = controller.codex_command("codex", self.workspace, state, self.root)
+        invocation = controller.codex_command("codex", self.workspace, state, self.root)
+        command = invocation.command
         self.assertNotIn("--approve-for-me", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "danger-full-access")
         self.assertIn('approval_policy="never"', command)
         self.assertEqual(command[command.index("--add-dir") + 1], str(self.root))
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("--full-auto", command)
-        self.assertIn("MISSION.json", command[-1])
-        self.assertIn("Current adapter packet", command[-1])
-        self.assertIn("Never silently downgrade", command[-1])
-        self.assertIn("Never invent ratings", command[-1])
+        self.assertEqual(command[-1], "-")
+        self.assertIn("MISSION.json", invocation.prompt)
+        self.assertIn("Current adapter packet", invocation.prompt)
+        self.assertIn("Never silently downgrade", invocation.prompt)
+        self.assertIn("Never invent ratings", invocation.prompt)
         state["control"]["thread_id"] = "thread-test"
         resumed = controller.codex_command("codex", self.workspace, state, self.root)
-        self.assertLess(resumed.index("--sandbox"), resumed.index("resume"))
-        self.assertLess(resumed.index('approval_policy="never"'), resumed.index("resume"))
-        self.assertEqual(resumed[resumed.index("--add-dir") + 1], str(self.root))
+        self.assertLess(resumed.command.index("--sandbox"), resumed.command.index("resume"))
+        self.assertLess(
+            resumed.command.index('approval_policy="never"'), resumed.command.index("resume")
+        )
+        self.assertEqual(
+            resumed.command[resumed.command.index("--add-dir") + 1], str(self.root)
+        )
+        self.assertEqual(resumed.command[-1], "-")
 
     def test_codex_command_pins_model_and_ultra_effort(self) -> None:
         state = campaign.load_state(self.root)
-        command = controller.codex_command(
+        invocation = controller.codex_command(
             "codex",
             self.workspace,
             state,
@@ -376,6 +383,7 @@ class ControllerTests(unittest.TestCase):
             "gpt-5.6-sol",
             "ultra",
         )
+        command = invocation.command
         self.assertEqual(command[1:5], [
             "--model",
             "gpt-5.6-sol",
@@ -383,6 +391,57 @@ class ControllerTests(unittest.TestCase):
             'model_reasoning_effort="ultra"',
         ])
         self.assertLess(command.index("--config"), command.index("exec"))
+
+    def test_director_launch_packet_stays_bounded_as_research_history_grows(self) -> None:
+        state = campaign.load_state(self.root)
+        marker = "full-scientific-report-body-must-not-be-inlined"
+        lab = state["research_os"]
+        lab["scouting"]["reports"] = {
+            role: {"territory_summary": marker + ("x" * 200_000), "opportunities": []}
+            for role in ("literature", "systems", "cross_domain")
+        }
+        lab["protocol"]["history"] = [{"large": marker + ("y" * 200_000)}]
+        lab["portfolio"]["concept_freeze"] = {
+            "hypothesis_id": "bounded-packet",
+            "frozen_at": "2098-01-01T00:00:00Z",
+            "graph_sha256": "a" * 64,
+            "preliminary_novelty": {"large": marker + ("z" * 200_000)},
+        }
+        lab["portfolio"]["branch_maturity"]["bounded-packet"] = "scout"
+
+        invocation = controller.codex_command("codex", self.workspace, state, self.root)
+
+        self.assertEqual(invocation.command[-1], "-")
+        self.assertLess(len(invocation.prompt.encode("utf-8")), 64 * 1024)
+        self.assertNotIn(marker, invocation.prompt)
+        self.assertIn("authoritative_research_os_sha256", invocation.prompt)
+        self.assertIn("campaign.json for full scout reports", invocation.prompt)
+        self.assertLess(max(len(argument.encode("utf-8")) for argument in invocation.command), 4096)
+
+    def test_codex_process_reads_large_prompt_from_stdin_not_argv(self) -> None:
+        fake_codex = self.base / "fake-stdin-codex.py"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = sys.stdin.buffer.read()\n"
+            "if sys.argv[-1] != '-' or len(payload) < 2 * 1024 * 1024:\n"
+            "    raise SystemExit(41)\n"
+            "print(json.dumps({'type': 'thread.started', 'thread_id': 'stdin-thread'}))\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        prompt = "p" * (2 * 1024 * 1024 + 1)
+        invocation = controller.CodexInvocation([str(fake_codex), "-"], prompt)
+
+        process = controller.start_codex_process(invocation, workspace=self.workspace)
+        self.assertIsNotNone(process.stdout)
+        output = process.stdout.read() if process.stdout else ""
+        if process.stdout:
+            process.stdout.close()
+
+        self.assertEqual(process.wait(), 0)
+        self.assertIn("stdin-thread", output)
+        self.assertEqual(invocation.command, [str(fake_codex), "-"])
 
     def test_codex_canary_requires_the_expected_filesystem_marker(self) -> None:
         fake_codex = self.base / "fake-canary-codex"
@@ -395,6 +454,8 @@ class ControllerTests(unittest.TestCase):
             "  shift\n"
             "done\n"
             "test -n \"$workspace\"\n"
+            "prompt=$(cat)\n"
+            "case \"$prompt\" in *gadi-autoresearch-controller-canary-v2*) ;; *) exit 42 ;; esac\n"
             "printf '%s\\n' gadi-autoresearch-controller-canary-v2 > \"$workspace/canary.txt\"\n",
             encoding="utf-8",
         )
@@ -412,12 +473,14 @@ class ControllerTests(unittest.TestCase):
             "mechanism_without_brand": "Blind mechanism description.",
             "primitives": [{"id": "p1", "description": "Primitive one."}],
         }
-        command = controller.novelty_codex_command("codex", self.workspace, self.root, audit)
+        invocation = controller.novelty_codex_command("codex", self.workspace, self.root, audit)
+        command = invocation.command
         self.assertNotIn("resume", command)
         self.assertIn("--json", command)
-        self.assertIn("cold, adversarial novelty reviewer", command[-1])
-        self.assertIn("blind-candidate", command[-1])
-        self.assertIn("do not open IDEA_REPORT.md", command[-1])
+        self.assertEqual(command[-1], "-")
+        self.assertIn("cold, adversarial novelty reviewer", invocation.prompt)
+        self.assertIn("blind-candidate", invocation.prompt)
+        self.assertIn("do not open IDEA_REPORT.md", invocation.prompt)
 
         pinned = controller.novelty_codex_command(
             "codex",
@@ -427,8 +490,8 @@ class ControllerTests(unittest.TestCase):
             "gpt-5.6-sol",
             "ultra",
         )
-        self.assertIn("gpt-5.6-sol", pinned)
-        self.assertIn('model_reasoning_effort="ultra"', pinned)
+        self.assertIn("gpt-5.6-sol", pinned.command)
+        self.assertIn('model_reasoning_effort="ultra"', pinned.command)
 
     def test_controller_attests_valid_review_from_distinct_thread(self) -> None:
         review = self.prepare_novelty_review()

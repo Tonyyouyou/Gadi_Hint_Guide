@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -38,6 +39,12 @@ RUNNING_STATES = {
     "opportunity_scout_running": ("opportunity_scout", "needs_opportunity_scouts"),
     "evidence_analyst_running": ("evidence_analyst", "needs_evidence_analysis"),
 }
+
+
+@dataclass(frozen=True)
+class CodexInvocation:
+    command: list[str]
+    prompt: str
 
 
 def rotate_log(path: Path) -> None:
@@ -377,6 +384,164 @@ def maybe_repack_workspace(root: Path, state: dict[str, Any]) -> None:
         return
 
 
+def compact_research_director_packet(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded launch context; campaign.json remains the scientific source of truth."""
+    lab = state.get("research_os") or {}
+    portfolio = lab.get("portfolio") or {}
+    concept_freeze = portfolio.get("concept_freeze") or {}
+    protocol = lab.get("protocol") or {}
+    infrastructure = lab.get("infrastructure") or {}
+    cells = infrastructure.get("cells") or {}
+    scouting = lab.get("scouting") or {}
+    reports = scouting.get("reports") or {}
+    decisions = lab.get("director_decisions") or []
+    latest_decision = decisions[-1] if decisions else None
+    health = campaign.research_health(state)
+    core_signal_ids = health.get("core_signal_finding_ids") or []
+    alerts = health.get("alerts") or []
+    active_hypothesis_id = concept_freeze.get("hypothesis_id")
+    active_cell_ids = sorted(
+        cell_id
+        for cell_id, cell in cells.items()
+        if isinstance(cell, dict) and cell.get("hypothesis_id") == active_hypothesis_id
+    )
+    maturity_counts: dict[str, int] = {}
+    for maturity in (portfolio.get("branch_maturity") or {}).values():
+        maturity_counts[str(maturity)] = maturity_counts.get(str(maturity), 0) + 1
+    open_blocker_ids = [
+        blocker.get("id")
+        for blocker in protocol.get("hard_blockers") or []
+        if isinstance(blocker, dict) and blocker.get("status") == "open"
+    ]
+    latest_decision_index = None
+    if isinstance(latest_decision, dict):
+        latest_decision_index = {
+            key: latest_decision.get(key)
+            for key in (
+                "decision_id",
+                "hypothesis_id",
+                "decision",
+                "maturity_before",
+                "maturity_after",
+                "core_signal",
+                "next_budget",
+                "recorded_at",
+            )
+        }
+        latest_decision_index["sha256"] = campaign.sha256_json(latest_decision)
+    compact_health = {
+        key: health.get(key)
+        for key in (
+            "mode",
+            "elapsed_hours",
+            "scientific_cells",
+            "core_mechanism_cells",
+            "terminal_attempts",
+            "interpretations",
+            "independent_analyses",
+            "scientific_findings",
+            "protocol_diagnostics",
+            "technical_invalid_fraction",
+            "independent_reviews",
+            "time_to_first_core_signal_hours",
+            "active_decision_budget",
+        )
+    }
+    compact_health.update(
+        {
+            "core_signal_count": len(core_signal_ids),
+            "recent_core_signal_finding_ids": core_signal_ids[-8:],
+            "alert_count": len(alerts),
+            "alerts": alerts,
+        }
+    )
+    return {
+        "authoritative_state": str(root / "campaign.json"),
+        "authoritative_research_os_sha256": campaign.sha256_json(lab),
+        "note": (
+            "This launch packet is intentionally bounded. Read campaign.json for full scout "
+            "reports, protocol history, preliminary novelty, cells, and Director decisions."
+        ),
+        "research_os_index": {
+            "schema_version": lab.get("schema_version"),
+            "mode": lab.get("mode"),
+            "updated_at": lab.get("updated_at"),
+            "authority": lab.get("authority"),
+            "portfolio": {
+                "active_hypothesis_id": active_hypothesis_id,
+                "active_hypothesis_maturity": (portfolio.get("branch_maturity") or {}).get(
+                    active_hypothesis_id
+                ),
+                "branch_count": len(portfolio.get("branch_maturity") or {}),
+                "maturity_counts": maturity_counts,
+                "concept_freeze": {
+                    "frozen_at": concept_freeze.get("frozen_at"),
+                    "graph_sha256": concept_freeze.get("graph_sha256"),
+                    "hypothesis_id": active_hypothesis_id,
+                    "preliminary_novelty_sha256": campaign.sha256_json(
+                        concept_freeze.get("preliminary_novelty")
+                    )
+                    if concept_freeze.get("preliminary_novelty") is not None
+                    else None,
+                },
+                "last_director_decision_id": portfolio.get("last_director_decision_id"),
+                "director_decision_required": portfolio.get("director_decision_required") is not None,
+                "director_decision_required_sha256": campaign.sha256_json(
+                    portfolio.get("director_decision_required")
+                )
+                if portfolio.get("director_decision_required") is not None
+                else None,
+                "active_budget": portfolio.get("active_budget"),
+            },
+            "protocol": {
+                "revision": protocol.get("revision"),
+                "protocol_id": protocol.get("protocol_id"),
+                "status": protocol.get("status"),
+                "decision": protocol.get("decision"),
+                "claim_ceiling": protocol.get("claim_ceiling"),
+                "updated_at": protocol.get("updated_at"),
+                "scope_count": len(protocol.get("scope") or []),
+                "warning_count": len(protocol.get("warnings") or []),
+                "open_hard_blocker_ids": open_blocker_ids,
+                "evidence_ids": protocol.get("evidence_ids") or [],
+                "current_sha256": campaign.sha256_json(
+                    {key: value for key, value in protocol.items() if key != "history"}
+                ),
+                "history_count": len(protocol.get("history") or []),
+            },
+            "infrastructure": {
+                "cache_policy": infrastructure.get("cache_policy"),
+                "cell_count": len(cells),
+                "active_hypothesis_cell_ids": active_cell_ids,
+                "cells_sha256": campaign.sha256_json(cells),
+            },
+            "scouting": {
+                "round": scouting.get("round"),
+                "requested_at": scouting.get("requested_at"),
+                "active_role": scouting.get("active_role"),
+                "report_roles": sorted(reports),
+                "report_sha256": {
+                    role: campaign.sha256_json(report) for role, report in sorted(reports.items())
+                },
+            },
+            "director_decision_count": len(decisions),
+            "latest_director_decision": latest_decision_index,
+            "review_chain": lab.get("review_chain"),
+            "signal": {
+                "first_core_signal_at": (lab.get("signal") or {}).get("first_core_signal_at"),
+                "core_signal_count": len(
+                    (lab.get("signal") or {}).get("core_signal_finding_ids") or []
+                ),
+                "recent_core_signal_finding_ids": (
+                    (lab.get("signal") or {}).get("core_signal_finding_ids") or []
+                )[-8:],
+            },
+            "circuit_breakers": lab.get("circuit_breakers"),
+        },
+        "health": compact_health,
+    }
+
+
 def agent_prompt(root: Path, state: dict[str, Any]) -> str:
     route = state.get("route", {})
     route_references = route.get("references") or ["references/adapter-system.md"]
@@ -398,10 +563,7 @@ def agent_prompt(root: Path, state: dict[str, Any]) -> str:
         sort_keys=True,
     )
     research_packet = json.dumps(
-        {
-            "research_os": state.get("research_os"),
-            "health": campaign.research_health(state),
-        },
+        compact_research_director_packet(root, state),
         indent=2,
         sort_keys=True,
     )
@@ -648,7 +810,7 @@ def codex_command(
     root: Path,
     model: str | None = None,
     reasoning_effort: str | None = None,
-) -> list[str]:
+) -> CodexInvocation:
     thread_id = state["control"].get("thread_id")
     prompt = agent_prompt(root, state)
     common = [
@@ -657,8 +819,8 @@ def codex_command(
         str(root),
     ]
     if thread_id:
-        return [*common, "resume", "--json", thread_id, prompt]
-    return [*common, "--json", "-C", str(workspace), prompt]
+        return CodexInvocation([*common, "resume", "--json", thread_id, "-"], prompt)
+    return CodexInvocation([*common, "--json", "-C", str(workspace), "-"], prompt)
 
 
 def novelty_codex_command(
@@ -668,13 +830,16 @@ def novelty_codex_command(
     audit: dict[str, Any],
     model: str | None = None,
     reasoning_effort: str | None = None,
-) -> list[str]:
+) -> CodexInvocation:
     common = [
         *unattended_exec_prefix(codex_bin, model, reasoning_effort),
         "--add-dir",
         str(root),
     ]
-    return [*common, "--json", "-C", str(workspace), novelty_reviewer_prompt(root, audit)]
+    return CodexInvocation(
+        [*common, "--json", "-C", str(workspace), "-"],
+        novelty_reviewer_prompt(root, audit),
+    )
 
 
 def novelty_arbiter_codex_command(
@@ -684,13 +849,16 @@ def novelty_arbiter_codex_command(
     rebuttal: dict[str, Any],
     model: str | None = None,
     reasoning_effort: str | None = None,
-) -> list[str]:
+) -> CodexInvocation:
     common = [
         *unattended_exec_prefix(codex_bin, model, reasoning_effort),
         "--add-dir",
         str(root),
     ]
-    return [*common, "--json", "-C", str(workspace), novelty_arbiter_prompt(root, rebuttal)]
+    return CodexInvocation(
+        [*common, "--json", "-C", str(workspace), "-"],
+        novelty_arbiter_prompt(root, rebuttal),
+    )
 
 
 def failure_reviewer_codex_command(
@@ -702,19 +870,16 @@ def failure_reviewer_codex_command(
     experiment: dict[str, Any],
     model: str | None = None,
     reasoning_effort: str | None = None,
-) -> list[str]:
+) -> CodexInvocation:
     common = [
         *unattended_exec_prefix(codex_bin, model, reasoning_effort),
         "--add-dir",
         str(root),
     ]
-    return [
-        *common,
-        "--json",
-        "-C",
-        str(workspace),
+    return CodexInvocation(
+        [*common, "--json", "-C", str(workspace), "-"],
         failure_reviewer_prompt(root, finding_id, hypothesis, experiment),
-    ]
+    )
 
 
 def opportunity_scout_codex_command(
@@ -726,16 +891,19 @@ def opportunity_scout_codex_command(
     round_number: int,
     model: str | None = None,
     reasoning_effort: str | None = None,
-) -> list[str]:
-    return [
-        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
-        "--add-dir",
-        str(root),
-        "--json",
-        "-C",
-        str(workspace),
+) -> CodexInvocation:
+    return CodexInvocation(
+        [
+            *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+            "--add-dir",
+            str(root),
+            "--json",
+            "-C",
+            str(workspace),
+            "-",
+        ],
         opportunity_scout_prompt(root, state, role, round_number),
-    ]
+    )
 
 
 def evidence_analyst_codex_command(
@@ -746,20 +914,39 @@ def evidence_analyst_codex_command(
     hypothesis: dict[str, Any],
     model: str | None = None,
     reasoning_effort: str | None = None,
-) -> list[str]:
-    return [
-        *unattended_exec_prefix(codex_bin, model, reasoning_effort),
-        "--add-dir",
-        str(root),
-        "--json",
-        "-C",
-        str(workspace),
+) -> CodexInvocation:
+    return CodexInvocation(
+        [
+            *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+            "--add-dir",
+            str(root),
+            "--json",
+            "-C",
+            str(workspace),
+            "-",
+        ],
         evidence_analyst_prompt(root, experiment, hypothesis),
-    ]
+    )
+
+
+def start_codex_process(invocation: CodexInvocation, *, workspace: Path) -> subprocess.Popen[str]:
+    """Launch Codex with its prompt on stdin, outside the kernel argv size limits."""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", dir="/tmp") as prompt_stream:
+        prompt_stream.write(invocation.prompt)
+        prompt_stream.seek(0)
+        return subprocess.Popen(
+            invocation.command,
+            cwd=workspace,
+            stdin=prompt_stream,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
 
 
 def execute_fresh_codex(
-    command: list[str],
+    invocation: CodexInvocation,
     *,
     workspace: Path,
     root: Path,
@@ -780,14 +967,7 @@ def execute_fresh_codex(
             f"reasoning_effort={reasoning_effort or 'config default'}\n"
         )
         log.flush()
-        process = subprocess.Popen(
-            command,
-            cwd=workspace,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        process = start_codex_process(invocation, workspace=workspace)
         record_lease(root, role, target_state, process.pid)
         assert process.stdout is not None
         for line in process.stdout:
@@ -831,21 +1011,25 @@ def run_codex_canary(
         )
         if init.returncode != 0:
             raise campaign.CampaignError(f"could not initialize Codex canary repository: {init.stderr.strip()}")
-        command = [
-            *unattended_exec_prefix(codex_bin, model, reasoning_effort),
-            "--ephemeral",
-            "--json",
-            "-C",
-            str(workspace),
+        invocation = CodexInvocation(
+            [
+                *unattended_exec_prefix(codex_bin, model, reasoning_effort),
+                "--ephemeral",
+                "--json",
+                "-C",
+                str(workspace),
+                "-",
+            ],
             (
                 "Use the apply_patch tool to create canary.txt containing exactly "
                 f"{marker} followed by one newline. Do not create the file with shell redirection, "
                 "Python, sed, tee, or another file-writing command. Stop after verifying the file."
             ),
-        ]
+        )
         try:
             result = subprocess.run(
-                command,
+                invocation.command,
+                input=invocation.prompt,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -922,7 +1106,7 @@ def run_agent(
             }
         )
         campaign.add_history(current, "controller_transition", control_updates={"state": "agent_running"})
-    command = codex_command(codex_bin, workspace, current, root, model, reasoning_effort)
+    invocation = codex_command(codex_bin, workspace, current, root, model, reasoning_effort)
     log_path = root / "controller.log"
     rotate_log(log_path)
     discovered_thread = None
@@ -936,14 +1120,7 @@ def run_agent(
         )
         log.flush()
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=workspace,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+            process = start_codex_process(invocation, workspace=workspace)
         except OSError as exc:
             schedule_recovery(
                 root,
@@ -1119,7 +1296,7 @@ def run_novelty_reviewer(
             invalidated_review_sha256=(previous_review or {}).get("sha256"),
         )
 
-    command = novelty_codex_command(
+    invocation = novelty_codex_command(
         codex_bin,
         workspace,
         root,
@@ -1140,14 +1317,7 @@ def run_novelty_reviewer(
         )
         log.flush()
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=workspace,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+            process = start_codex_process(invocation, workspace=workspace)
         except OSError as exc:
             schedule_recovery(
                 root,
@@ -1459,7 +1629,7 @@ def run_novelty_arbiter(
             invalidated_arbitration_sha256=(previous_arbitration or {}).get("sha256"),
         )
 
-    command = novelty_arbiter_codex_command(
+    invocation = novelty_arbiter_codex_command(
         codex_bin,
         workspace,
         root,
@@ -1480,14 +1650,7 @@ def run_novelty_arbiter(
         )
         log.flush()
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=workspace,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+            process = start_codex_process(invocation, workspace=workspace)
         except OSError as exc:
             schedule_recovery(
                 root,
@@ -1781,7 +1944,7 @@ def run_failure_reviewer(
             author_thread_id=author_thread_id,
         )
 
-    command = failure_reviewer_codex_command(
+    invocation = failure_reviewer_codex_command(
         codex_bin,
         workspace,
         root,
@@ -1804,14 +1967,7 @@ def run_failure_reviewer(
         )
         log.flush()
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=workspace,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+            process = start_codex_process(invocation, workspace=workspace)
         except OSError as exc:
             schedule_recovery(
                 root,
@@ -2062,7 +2218,7 @@ def run_opportunity_scout(
             round=round_number,
         )
         launch_state = current
-    command = opportunity_scout_codex_command(
+    invocation = opportunity_scout_codex_command(
         codex_bin,
         workspace,
         root,
@@ -2074,7 +2230,7 @@ def run_opportunity_scout(
     )
     try:
         returncode, discovered_thread = execute_fresh_codex(
-            command,
+            invocation,
             workspace=workspace,
             root=root,
             role=f"opportunity_scout_{role}",
@@ -2243,7 +2399,7 @@ def run_evidence_analyst(
             }
         )
         campaign.add_history(current, "controller_evidence_analyst_started", experiment_id=experiment_id)
-    command = evidence_analyst_codex_command(
+    invocation = evidence_analyst_codex_command(
         codex_bin,
         workspace,
         root,
@@ -2254,7 +2410,7 @@ def run_evidence_analyst(
     )
     try:
         returncode, discovered_thread = execute_fresh_codex(
-            command,
+            invocation,
             workspace=workspace,
             root=root,
             role="evidence_analyst",
